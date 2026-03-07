@@ -1,109 +1,241 @@
-use shakmaty::{Board, Chess, Position, Move, Square, Piece, Color, Role};
-use std::process::{Command, Stdio};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-pub struct Chessboard {
-    board: Board,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MistakeClass {
+    Inaccuracy,
+    Mistake,
+    Blunder,
 }
 
-impl Chessboard {
-    pub fn new() -> Self {
-        Chessboard {
-            board: Board::default(),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Score {
+    Centipawns(i32),
+    Mate(i32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variation {
+    pub multipv: u32,
+    pub depth: u32,
+    pub score: Score,
+    pub pv: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisResult {
+    pub bestmove: String,
+    pub variations: Vec<Variation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnalysisConfig {
+    pub depth: u32,
+    pub multipv: u32,
+}
+
+impl Default for AnalysisConfig {
+    fn default() -> Self {
+        Self {
+            depth: 20,
+            multipv: 3,
         }
     }
+}
 
-    pub fn display(&self) {
-        println!("{}", self.board.board_fen(shakmaty::fen::FenOpts::default()));
-    }
-
-    pub fn make_move(&mut self, mv: Move) -> Result<(), String> {
-        if self.board.is_legal(&mv) {
-            self.board.play_unchecked(&mv);
-            Ok(())
-        } else {
-            Err("Illegal move".to_string())
-        }
-    }
-
-    pub fn get_board(&self) -> &Board {
-        &self.board
-    }
+#[derive(Debug, Clone)]
+struct VariationBuilder {
+    multipv: u32,
+    depth: u32,
+    score: Score,
+    pv: Vec<String>,
 }
 
 pub struct StockfishEngine {
-    process: std::process::Child,
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
 }
 
 impl StockfishEngine {
-    pub fn new() -> Result<Self, String> {
-        let process = Command::new("stockfish")
+    pub fn new(binary_path: &str) -> Result<Self, String> {
+        let mut child = Command::new(binary_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to start Stockfish: {}", e))?;
+            .map_err(|e| format!("failed to start Stockfish: {e}"))?;
 
-        let mut engine = StockfishEngine { process };
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Stockfish stdin was unavailable".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Stockfish stdout was unavailable".to_string())?;
 
-        // Initialize UCI
+        let mut engine = Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        };
+
         engine.send_command("uci")?;
-        engine.wait_for_ready()?;
+        engine.wait_for_line_exact("uciok")?;
+        engine.send_command("isready")?;
+        engine.wait_for_line_exact("readyok")?;
 
         Ok(engine)
     }
 
-    fn send_command(&mut self, cmd: &str) -> Result<(), String> {
-        if let Some(ref mut stdin) = self.process.stdin {
-            writeln!(stdin, "{}", cmd).map_err(|e| format!("Failed to send command: {}", e))?;
-            Ok(())
-        } else {
-            Err("No stdin".to_string())
-        }
-    }
-
-    fn wait_for_ready(&mut self) -> Result<(), String> {
-        if let Some(ref mut stdout) = self.process.stdout {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                let line = line.map_err(|e| format!("Read error: {}", e))?;
-                if line == "readyok" {
-                    return Ok(());
-                }
-            }
-        }
-        Err("Did not receive readyok".to_string())
-    }
-
-    pub fn set_position(&mut self, fen: &str) -> Result<(), String> {
-        self.send_command(&format!("position fen {}", fen))?;
+    pub fn analyze_fen(
+        &mut self,
+        fen: &str,
+        cfg: AnalysisConfig,
+    ) -> Result<AnalysisResult, String> {
+        self.send_command(&format!("setoption name MultiPV value {}", cfg.multipv))?;
         self.send_command("isready")?;
-        self.wait_for_ready()
-    }
+        self.wait_for_line_exact("readyok")?;
 
-    pub fn go(&mut self, time: u32) -> Result<String, String> {
-        self.send_command(&format!("go movetime {}", time))?;
-        if let Some(ref mut stdout) = self.process.stdout {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                let line = line.map_err(|e| format!("Read error: {}", e))?;
-                if line.starts_with("bestmove") {
-                    return Ok(line);
+        self.send_command(&format!("position fen {fen}"))?;
+        self.send_command(&format!("go depth {}", cfg.depth))?;
+
+        let mut buf = String::new();
+        let mut bestmove = String::new();
+        let mut map: BTreeMap<u32, VariationBuilder> = BTreeMap::new();
+
+        loop {
+            buf.clear();
+            let read = self
+                .stdout
+                .read_line(&mut buf)
+                .map_err(|e| format!("failed reading engine output: {e}"))?;
+
+            if read == 0 {
+                return Err("engine exited before returning bestmove".to_string());
+            }
+
+            let line = buf.trim();
+            if line.starts_with("info ") {
+                if let Some(v) = parse_info_line(line) {
+                    map.insert(v.multipv, v);
                 }
+                continue;
+            }
+
+            if line.starts_with("bestmove ") {
+                if let Some(token) = line.split_whitespace().nth(1) {
+                    bestmove = token.to_string();
+                }
+                break;
             }
         }
-        Err("No bestmove received".to_string())
+
+        if bestmove.is_empty() {
+            return Err("engine did not report a valid bestmove".to_string());
+        }
+
+        let mut variations = map
+            .into_values()
+            .map(|v| Variation {
+                multipv: v.multipv,
+                depth: v.depth,
+                score: v.score,
+                pv: v.pv,
+            })
+            .collect::<Vec<_>>();
+        variations.sort_by_key(|v| v.multipv);
+
+        Ok(AnalysisResult {
+            bestmove,
+            variations,
+        })
+    }
+
+    fn send_command(&mut self, command: &str) -> Result<(), String> {
+        writeln!(self.stdin, "{command}")
+            .and_then(|_| self.stdin.flush())
+            .map_err(|e| format!("failed sending command '{command}': {e}"))
+    }
+
+    fn wait_for_line_exact(&mut self, needle: &str) -> Result<(), String> {
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            let read = self
+                .stdout
+                .read_line(&mut buf)
+                .map_err(|e| format!("failed reading engine output: {e}"))?;
+            if read == 0 {
+                return Err(format!("engine exited before '{needle}'"));
+            }
+            if buf.trim() == needle {
+                return Ok(());
+            }
+        }
     }
 }
 
 impl Drop for StockfishEngine {
     fn drop(&mut self) {
         let _ = self.send_command("quit");
-        let _ = self.process.wait();
+        let _ = self.child.wait();
     }
 }
 
-pub fn initialize() {
-    // TODO: implement engine startup and command handling
+pub fn classify_centipawn_loss(loss: i32) -> Option<MistakeClass> {
+    if loss >= 250 {
+        Some(MistakeClass::Blunder)
+    } else if loss >= 120 {
+        Some(MistakeClass::Mistake)
+    } else if loss >= 60 {
+        Some(MistakeClass::Inaccuracy)
+    } else {
+        None
+    }
+}
+
+fn parse_info_line(line: &str) -> Option<VariationBuilder> {
+    let tokens = line.split_whitespace().collect::<Vec<_>>();
+    let mut multipv = 1;
+    let mut depth = 0;
+    let mut score = None;
+    let mut pv = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        match tokens[i] {
+            "depth" if i + 1 < tokens.len() => {
+                depth = tokens[i + 1].parse().ok()?;
+                i += 2;
+            }
+            "multipv" if i + 1 < tokens.len() => {
+                multipv = tokens[i + 1].parse().ok()?;
+                i += 2;
+            }
+            "score" if i + 2 < tokens.len() => {
+                score = match tokens[i + 1] {
+                    "cp" => Some(Score::Centipawns(tokens[i + 2].parse().ok()?)),
+                    "mate" => Some(Score::Mate(tokens[i + 2].parse().ok()?)),
+                    _ => None,
+                };
+                i += 3;
+            }
+            "pv" => {
+                pv.extend(tokens[i + 1..].iter().map(|t| (*t).to_string()));
+                break;
+            }
+            _ => i += 1,
+        }
+    }
+
+    Some(VariationBuilder {
+        multipv,
+        depth,
+        score: score?,
+        pv,
+    })
 }
 
 #[cfg(test)]
@@ -111,8 +243,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_chessboard_creation() {
-        let board = Chessboard::new();
-        assert_eq!(board.get_board().board_fen(shakmaty::fen::FenOpts::default()), "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR");
+    fn classifies_loss_bands() {
+        assert_eq!(classify_centipawn_loss(59), None);
+        assert_eq!(classify_centipawn_loss(60), Some(MistakeClass::Inaccuracy));
+        assert_eq!(classify_centipawn_loss(120), Some(MistakeClass::Mistake));
+        assert_eq!(classify_centipawn_loss(250), Some(MistakeClass::Blunder));
+    }
+
+    #[test]
+    fn parses_uci_info_lines() {
+        let line = "info depth 18 multipv 2 score cp -42 pv e2e4 e7e5 g1f3";
+        let parsed = parse_info_line(line).expect("expected parse result");
+        assert_eq!(parsed.multipv, 2);
+        assert_eq!(parsed.depth, 18);
+        assert_eq!(parsed.score, Score::Centipawns(-42));
+        assert_eq!(parsed.pv, vec!["e2e4", "e7e5", "g1f3"]);
     }
 }
