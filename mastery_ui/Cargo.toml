@@ -1,0 +1,8 @@
+[package]
+name = "mastery_ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+# Iced or Slint dependencies go here
