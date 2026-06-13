@@ -7,6 +7,12 @@ Cargo.lock
 # Environment variables
 .env
 
+# AI tooling - local only
+.claude/
+graphify-out/
+.firecrawl/
+CLAUDE.md
+
 # Logs
 *.log
 

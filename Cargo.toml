@@ -4,6 +4,7 @@ members = [
     "pgn_processor",
     "mastery_ui",
     "db_manager",
+    "app",
 ]
 
 # Add any common workspace settings here

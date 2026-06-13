@@ -50,6 +50,21 @@ pub fn first_critical_mistake(moves: &[String], losses: &[i32]) -> Option<Mistak
     })
 }
 
+pub fn game_to_fen_and_uci(moves: &[String]) -> Result<Vec<(String, String)>, String> {
+    use shakmaty::{Chess, Position, san::San, uci::Uci};
+    let mut pos = Chess::default();
+    let mut result = Vec::new();
+    for san_str in moves {
+        let fen_before = shakmaty::fen::Fen::from_position(pos.clone(), shakmaty::EnPassantMode::Always).to_string();
+        let san: San = san_str.parse().map_err(|e| format!("invalid SAN move '{san_str}': {e}"))?;
+        let m = san.to_move(&pos).map_err(|e| format!("illegal move '{san_str}' in pos {fen_before}: {e}"))?;
+        let uci_move = Uci::from_move(&m, shakmaty::CastlingMode::Standard).to_string();
+        pos = pos.play(&m).map_err(|e| format!("failed to play move '{san_str}' in pos {fen_before}: {e}"))?;
+        result.push((fen_before, uci_move));
+    }
+    Ok(result)
+}
+
 pub fn classify_centipawn_loss(loss: i32) -> Option<MistakeClass> {
     if loss >= 250 {
         Some(MistakeClass::Blunder)
@@ -167,5 +182,16 @@ mod tests {
         let critical = first_critical_mistake(&moves, &losses).expect("expected mistake");
         assert_eq!(critical.ply, 3);
         assert_eq!(critical.class, MistakeClass::Mistake);
+    }
+
+    #[test]
+    fn converts_game_moves_to_fen_and_uci() {
+        let moves = vec!["e4".to_string(), "e5".to_string(), "Nf3".to_string()];
+        let fen_and_uci = game_to_fen_and_uci(&moves).unwrap();
+        assert_eq!(fen_and_uci.len(), 3);
+        assert_eq!(fen_and_uci[0].0, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert_eq!(fen_and_uci[0].1, "e2e4");
+        assert_eq!(fen_and_uci[1].1, "e7e5");
+        assert_eq!(fen_and_uci[2].1, "g1f3");
     }
 }
