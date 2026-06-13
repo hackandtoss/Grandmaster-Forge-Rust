@@ -6,6 +6,22 @@ CREATE TABLE IF NOT EXISTS lichess_sync (
 );
 "#,
     r#"
+CREATE TABLE IF NOT EXISTS opening_tree (
+    id TEXT PRIMARY KEY,
+    parent_id TEXT,
+    move_uci TEXT NOT NULL,
+    move_san TEXT NOT NULL,
+    fen TEXT NOT NULL,
+    eco TEXT,
+    opening_name TEXT,
+    master_games INTEGER DEFAULT 0,
+    white_wins INTEGER DEFAULT 0,
+    draws INTEGER DEFAULT 0,
+    black_wins INTEGER DEFAULT 0,
+    FOREIGN KEY(parent_id) REFERENCES opening_tree(id)
+);
+"#,
+    r#"
 CREATE TABLE IF NOT EXISTS games (
     id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
@@ -118,6 +134,21 @@ pub struct PuzzleRecord {
     pub solution_uci: String,
     pub theme: String,
     pub difficulty: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpeningNode {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub move_uci: String,
+    pub move_san: String,
+    pub fen: String,
+    pub eco: Option<String>,
+    pub opening_name: Option<String>,
+    pub master_games: i64,
+    pub white_wins: i64,
+    pub draws: i64,
+    pub black_wins: i64,
 }
 
 pub trait TrainingStore {
@@ -380,6 +411,61 @@ impl SqliteStore {
         }
     }
 
+    pub fn insert_opening_node(&mut self, node: &OpeningNode) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO opening_tree
+                 (id, parent_id, move_uci, move_san, fen, eco, opening_name,
+                  master_games, white_wins, draws, black_wins)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                rusqlite::params![
+                    node.id, node.parent_id, node.move_uci, node.move_san, node.fen,
+                    node.eco, node.opening_name, node.master_games, node.white_wins,
+                    node.draws, node.black_wins
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_children(&self, parent_id: Option<&str>) -> Result<Vec<OpeningNode>, String> {
+        let map_row = |row: &rusqlite::Row| {
+            Ok(OpeningNode {
+                id: row.get(0)?,
+                parent_id: row.get(1)?,
+                move_uci: row.get(2)?,
+                move_san: row.get(3)?,
+                fen: row.get(4)?,
+                eco: row.get(5)?,
+                opening_name: row.get(6)?,
+                master_games: row.get(7)?,
+                white_wins: row.get(8)?,
+                draws: row.get(9)?,
+                black_wins: row.get(10)?,
+            })
+        };
+
+        let col = "id, parent_id, move_uci, move_san, fen, eco, opening_name, \
+                   master_games, white_wins, draws, black_wins";
+
+        let nodes = if let Some(pid) = parent_id {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {col} FROM opening_tree WHERE parent_id = ?1 ORDER BY master_games DESC"
+            )).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map(rusqlite::params![pid], map_row)
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
+        } else {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {col} FROM opening_tree WHERE parent_id IS NULL ORDER BY master_games DESC"
+            )).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], map_row).map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        Ok(nodes)
+    }
+
     pub fn run_migrations(&mut self) -> Result<(), String> {
         let migrations = [
             "ALTER TABLE opening_lines ADD COLUMN srs_interval REAL DEFAULT 1.0",
@@ -591,6 +677,31 @@ mod tests {
         let fetched = store.get_next_puzzle(1600).unwrap().expect("should have puzzle");
         assert_eq!(fetched.id, "puzzle1");
         assert!(store.get_next_puzzle(1000).unwrap().is_none());
+    }
+
+    #[test]
+    fn opening_tree_parent_child() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+
+        let node = OpeningNode {
+            id: "root_e4".to_string(),
+            parent_id: None,
+            move_uci: "e2e4".to_string(),
+            move_san: "e4".to_string(),
+            fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1".to_string(),
+            eco: Some("B00".to_string()),
+            opening_name: Some("King's Pawn".to_string()),
+            master_games: 10000,
+            white_wins: 4200,
+            draws: 2800,
+            black_wins: 3000,
+        };
+        store.insert_opening_node(&node).unwrap();
+
+        let children = store.get_children(None).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].move_san, "e4");
     }
 
     #[test]

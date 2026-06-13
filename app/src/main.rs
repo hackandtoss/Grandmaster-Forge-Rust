@@ -1,3 +1,8 @@
+mod srs;
+mod accuracy;
+mod weakness;
+mod scraper;
+
 use db_manager::{GameRecord, OpeningLineRecord, PositionRecord, SqliteStore, TrainingEventRecord, TrainingStore};
 use engine_controller::{AnalysisConfig, StockfishEngine};
 use shakmaty::{CastlingMode, Chess, Position};
@@ -109,6 +114,11 @@ slint::slint! {
         in-out property <string> drill-instructions: "Select a line to drill.";
         in-out property <bool> drill-active: false;
 
+        // Status / analysis properties
+        in-out property <string> weakness-summary: "";
+        in-out property <string> sync-status: "Not synced";
+        in-out property <string> tree-status: "";
+
         // Callbacks
         callback select-screen(string);
         callback import-pgn(string);
@@ -117,6 +127,10 @@ slint::slint! {
         callback select-repertoire-line(string);
         callback click-board-square(int);
         callback start-drill();
+        callback sync-lichess(string);
+        callback build-opening-tree();
+        callback load-puzzle();
+        callback explorer-select-move(string);
 
         HorizontalLayout {
             // Sidebar
@@ -780,6 +794,8 @@ struct AppState {
     drill_line: Option<OpeningLineRecord>,
     drill_moves_left: Vec<String>,
     drill_chess: Chess,
+    // Current board FEN for explorer
+    current_fen: Option<String>,
 }
 
 fn main() {
@@ -789,6 +805,7 @@ fn main() {
     // Initialize database
     let mut db = SqliteStore::new("forge.db").expect("failed to open database file forge.db");
     db.bootstrap().expect("failed to bootstrap database tables");
+    db.run_migrations().expect("failed to run database migrations");
 
     // Load initial data
     let state = Arc::new(Mutex::new(AppState {
@@ -797,6 +814,7 @@ fn main() {
         drill_line: None,
         drill_moves_left: Vec::new(),
         drill_chess: Chess::default(),
+        current_fen: None,
     }));
 
     let app = AppWindow::new().expect("failed to create Slint window");
@@ -811,12 +829,36 @@ fn main() {
             let app = app_weak.upgrade().unwrap();
 
             // Refresh dashboard
+            let today = local_now_str();
+            let due_lines = state.db.get_due_opening_lines("default_user", &today).unwrap_or_default();
             let snapshot = mastery_ui::UserSnapshot {
-                opening_due: state.db.get_opening_due_count("default_user").unwrap_or(0),
+                opening_due: due_lines.len() as u32,
                 blunder_hotspots: state.db.get_blunder_hotspots_count().unwrap_or(0),
                 puzzle_rating: state.db.get_puzzle_rating("default_user").unwrap_or(1500),
                 has_unreviewed_games: state.db.get_unreviewed_games_count().unwrap_or(0) > 0,
             };
+
+            // Weakness profile
+            let all_positions: Vec<(u32, Option<i32>, Option<String>, Option<String>)> = {
+                let mut stmt = state.db.conn.prepare(
+                    "SELECT p.ply, p.centipawn_loss, p.mistake_class, g.eco
+                     FROM positions p JOIN games g ON g.id = p.game_id"
+                ).unwrap();
+                stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, u32>(0)?,
+                        row.get::<_, Option<i32>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                }).unwrap().filter_map(|r| r.ok()).collect()
+            };
+            let avg_endgame_acc = state.db.conn.query_row(
+                "SELECT COALESCE(AVG(accuracy_endgame), 100.0) FROM games WHERE accuracy_endgame IS NOT NULL",
+                [], |row| row.get::<_, f64>(0),
+            ).unwrap_or(100.0) as f32;
+            let wr = weakness::build_weakness_report(&all_positions, avg_endgame_acc);
+            app.set_weakness_summary(slint::SharedString::from(wr.top_training_priority));
             let rec = mastery_ui::recommend_next_action(&snapshot);
             app.set_rec_mode(slint::SharedString::from(format!("{:?}", rec.mode)));
             app.set_rec_reason(slint::SharedString::from(rec.reason));
@@ -868,6 +910,7 @@ fn main() {
     };
 
     use std::rc::Rc;
+    let refresh_data = std::sync::Arc::new(refresh_data);
     refresh_data();
 
     // Wiring screen selection
@@ -1037,13 +1080,26 @@ fn main() {
                         app.set_drill_active(false);
                         app.set_drill_instructions(slint::SharedString::from("Drill completed successfully! Confidence increased."));
 
-                        // Increase opening line confidence
                         if let Some(line) = state.drill_line.clone() {
+                            let card = srs::SrsCard {
+                                interval: line.srs_interval,
+                                ease_factor: line.srs_ease,
+                                repetitions: line.srs_reps,
+                            };
+                            let next = srs::review(&card, 5);
+                            let today_days = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() / 86400;
+                            let (dy, dm, dd) = days_to_ymd(today_days + next.interval as u64);
                             let mut updated = line.clone();
-                            updated.confidence = (updated.confidence + 0.2).min(1.0);
+                            updated.srs_interval = next.interval;
+                            updated.srs_ease = next.ease_factor;
+                            updated.srs_reps = next.repetitions;
+                            updated.srs_due_date = format!("{:04}-{:02}-{:02}", dy, dm, dd);
+                            updated.confidence = (next.repetitions as f32 / 10.0).min(1.0);
                             let _ = state.db.insert_opening_line(&updated);
 
-                            // Insert success log
                             let event = TrainingEventRecord {
                                 id: format!("evt_{}", uuid_now()),
                                 user_id: "default_user".to_string(),
@@ -1073,8 +1129,23 @@ fn main() {
                             app.set_drill_active(false);
                             app.set_drill_instructions(slint::SharedString::from("Drill completed successfully!"));
                             if let Some(line) = state.drill_line.clone() {
+                                let card = srs::SrsCard {
+                                    interval: line.srs_interval,
+                                    ease_factor: line.srs_ease,
+                                    repetitions: line.srs_reps,
+                                };
+                                let next = srs::review(&card, 5);
+                                let today_days = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() / 86400;
+                                let (dy, dm, dd) = days_to_ymd(today_days + next.interval as u64);
                                 let mut updated = line.clone();
-                                updated.confidence = (updated.confidence + 0.2).min(1.0);
+                                updated.srs_interval = next.interval;
+                                updated.srs_ease = next.ease_factor;
+                                updated.srs_reps = next.repetitions;
+                                updated.srs_due_date = format!("{:04}-{:02}-{:02}", dy, dm, dd);
+                                updated.confidence = (next.repetitions as f32 / 10.0).min(1.0);
                                 let _ = state.db.insert_opening_line(&updated);
 
                                 let event = TrainingEventRecord {
@@ -1096,9 +1167,27 @@ fn main() {
                     }
                 } else {
                     app.set_drill_instructions(slint::SharedString::from("Incorrect move! Try again."));
-                    
-                    // Log fail event
+
                     if let Some(line) = state.drill_line.clone() {
+                        let card = srs::SrsCard {
+                            interval: line.srs_interval,
+                            ease_factor: line.srs_ease,
+                            repetitions: line.srs_reps,
+                        };
+                        let next = srs::review(&card, 1);
+                        let today_days = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() / 86400;
+                        let (dy, dm, dd) = days_to_ymd(today_days + next.interval as u64);
+                        let mut updated = line.clone();
+                        updated.srs_interval = next.interval;
+                        updated.srs_ease = next.ease_factor;
+                        updated.srs_reps = next.repetitions;
+                        updated.srs_due_date = format!("{:04}-{:02}-{:02}", dy, dm, dd);
+                        updated.confidence = (next.repetitions as f32 / 10.0).min(1.0);
+                        let _ = state.db.insert_opening_line(&updated);
+
                         let event = TrainingEventRecord {
                             id: format!("evt_{}", uuid_now()),
                             user_id: "default_user".to_string(),
@@ -1252,6 +1341,10 @@ fn main() {
                                     line_uci: uci_line,
                                     source: "game_review".to_string(),
                                     confidence: 0.0,
+                                    srs_interval: 1.0,
+                                    srs_ease: 2.5,
+                                    srs_reps: 0,
+                                    srs_due_date: String::new(),
                                 };
                                 let mut state = state_thread.lock().unwrap();
                                 let _ = state.db.insert_opening_line(&line_record);
@@ -1280,7 +1373,151 @@ fn main() {
 
             // Local updates
             drop(state_lock);
-            refresh_data();
+            refresh_data_cp();
+        });
+    }
+
+    // Lichess sync callback
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh_data_cp = refresh_data.clone();
+        app.on_sync_lichess(move |username: slint::SharedString| {
+            let username = username.to_string();
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            let refresh_data_cp = refresh_data_cp.clone();
+            std::thread::spawn(move || {
+                // Status: syncing (upgrade happens on event-loop thread)
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_sync_status(slint::SharedString::from("Syncing…"));
+                    }
+                });
+                let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
+                let client = lichess_client::LichessClient::new(&token);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let games = rt.block_on(client.fetch_user_games(&username, 50));
+                let msg = match games {
+                    Ok(games) => {
+                        let count = games.len();
+                        let mut st = state.lock().unwrap();
+                        for g in &games {
+                            if !st.db.is_game_synced(&g.id) {
+                                let _ = st.db.mark_game_synced(&g.id, &local_now_str());
+                            }
+                        }
+                        drop(st);
+                        // refresh_data is Rc (non-Send), invoke on event loop thread
+                        let _ = slint::invoke_from_event_loop(move || { refresh_data_cp(); });
+                        format!("Synced {} games", count)
+                    }
+                    Err(e) => format!("Sync failed: {}", e),
+                };
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_sync_status(slint::SharedString::from(msg));
+                    }
+                });
+            });
+        });
+    }
+
+    // Build opening tree callback
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_build_opening_tree(move || {
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            std::thread::spawn(move || {
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_tree_status(slint::SharedString::from("Building tree…"));
+                    }
+                });
+                let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
+                let client = lichess_client::LichessClient::new(&token);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(scraper::collect_opening_nodes(&client, 4, 1000));
+                let msg = match result {
+                    Ok(nodes) => {
+                        let count = nodes.len();
+                        let mut st = state.lock().unwrap();
+                        for node in nodes {
+                            let _ = st.db.insert_opening_node(&node);
+                        }
+                        drop(st);
+                        format!("Tree built: {} nodes", count)
+                    }
+                    Err(e) => format!("Tree error: {}", e),
+                };
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_tree_status(slint::SharedString::from(msg));
+                    }
+                });
+            });
+        });
+    }
+
+    // Load puzzle callback
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_load_puzzle(move || {
+            let mut st = state.lock().unwrap();
+            if let Ok(Some(puzzle)) = st.db.get_next_puzzle(2000) {
+                let fen = puzzle.fen.clone();
+                drop(st);
+                if let Some(app) = app_weak.upgrade() {
+                    let pieces = fen_to_pieces(&fen);
+                    app.set_board_pieces(slint::ModelRc::new(slint::VecModel::from(
+                        pieces.iter().map(|s| slint::SharedString::from(s.as_str())).collect::<Vec<_>>(),
+                    )));
+                    app.set_drill_instructions(slint::SharedString::from(
+                        format!("Puzzle: find the best move ({})", puzzle.id),
+                    ));
+                }
+            } else {
+                drop(st);
+            }
+        });
+    }
+
+    // Opening explorer move selection callback
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_explorer_select_move(move |uci: slint::SharedString| {
+            let st = state.lock().unwrap();
+            let fen = st.current_fen.clone().unwrap_or_else(|| {
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string()
+            });
+            drop(st);
+            use shakmaty::{CastlingMode, Chess, EnPassantMode, Position};
+            use shakmaty::fen::Fen;
+            use shakmaty::uci::Uci;
+            let new_fen = (|| -> Result<String, String> {
+                let parsed: Fen = fen.parse().map_err(|e| format!("{e}"))?;
+                let pos: Chess = parsed.into_position(CastlingMode::Standard).map_err(|e| format!("{e}"))?;
+                let uci_move: Uci = uci.to_string().parse().map_err(|e| format!("{e}"))?;
+                let m = uci_move.to_move(&pos).map_err(|e| format!("{e}"))?;
+                let next = pos.play(&m).map_err(|e| format!("{e}"))?;
+                Ok(Fen::from_position(next, EnPassantMode::Always).to_string())
+            })();
+            if let Ok(new_fen) = new_fen {
+                if let Some(app) = app_weak.upgrade() {
+                    let pieces = fen_to_pieces(&new_fen);
+                    app.set_board_pieces(slint::ModelRc::new(slint::VecModel::from(
+                        pieces.iter().map(|s| slint::SharedString::from(s.as_str())).collect::<Vec<_>>(),
+                    )));
+                }
+            }
         });
     }
 
