@@ -1,5 +1,11 @@
 pub const SQLITE_SCHEMA: &[&str] = &[
     r#"
+CREATE TABLE IF NOT EXISTS lichess_sync (
+    game_id TEXT PRIMARY KEY,
+    synced_at TEXT NOT NULL
+);
+"#,
+    r#"
 CREATE TABLE IF NOT EXISTS games (
     id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
@@ -65,6 +71,10 @@ pub struct OpeningLineRecord {
     pub line_uci: Vec<String>,
     pub source: String,
     pub confidence: f32,
+    pub srs_interval: f32,
+    pub srs_ease: f32,
+    pub srs_reps: u32,
+    pub srs_due_date: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,8 +205,12 @@ impl SqliteStore {
     }
 
     pub fn get_opening_lines(&self, user_id: &str) -> Result<Vec<OpeningLineRecord>, String> {
-        let mut stmt = self.conn.prepare("SELECT id, user_id, opening_name, start_fen, line_uci, source, confidence FROM opening_lines WHERE user_id = ?1")
-            .map_err(|e| e.to_string())?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, user_id, opening_name, start_fen, line_uci, source, confidence,
+                    COALESCE(srs_interval, 1.0), COALESCE(srs_ease, 2.5),
+                    COALESCE(srs_reps, 0), COALESCE(srs_due_date, '')
+             FROM opening_lines WHERE user_id = ?1",
+        ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map([user_id], |row| {
             let line_uci_str: String = row.get(4)?;
             Ok(OpeningLineRecord {
@@ -207,6 +221,10 @@ impl SqliteStore {
                 line_uci: parse_line_uci(&line_uci_str),
                 source: row.get(5)?,
                 confidence: row.get(6)?,
+                srs_interval: row.get::<_, f64>(7).unwrap_or(1.0) as f32,
+                srs_ease: row.get::<_, f64>(8).unwrap_or(2.5) as f32,
+                srs_reps: row.get::<_, u32>(9).unwrap_or(0),
+                srs_due_date: row.get::<_, String>(10).unwrap_or_default(),
             })
         }).map_err(|e| e.to_string())?;
         let mut lines = Vec::new();
@@ -214,6 +232,56 @@ impl SqliteStore {
             lines.push(r.map_err(|e| e.to_string())?);
         }
         Ok(lines)
+    }
+
+    pub fn get_due_opening_lines(&self, user_id: &str, today: &str) -> Result<Vec<OpeningLineRecord>, String> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, user_id, opening_name, start_fen, line_uci, source, confidence,
+                    COALESCE(srs_interval, 1.0), COALESCE(srs_ease, 2.5),
+                    COALESCE(srs_reps, 0), COALESCE(srs_due_date, '')
+             FROM opening_lines
+             WHERE user_id = ?1 AND (srs_due_date IS NULL OR srs_due_date = '' OR srs_due_date <= ?2)
+             ORDER BY srs_due_date ASC",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![user_id, today], |row| {
+            let line_uci_str: String = row.get(4)?;
+            Ok(OpeningLineRecord {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                opening_name: row.get(2)?,
+                start_fen: row.get(3)?,
+                line_uci: parse_line_uci(&line_uci_str),
+                source: row.get(5)?,
+                confidence: row.get(6)?,
+                srs_interval: row.get::<_, f64>(7).unwrap_or(1.0) as f32,
+                srs_ease: row.get::<_, f64>(8).unwrap_or(2.5) as f32,
+                srs_reps: row.get::<_, u32>(9).unwrap_or(0),
+                srs_due_date: row.get::<_, String>(10).unwrap_or_default(),
+            })
+        }).map_err(|e| e.to_string())?;
+        let mut lines = Vec::new();
+        for r in rows {
+            lines.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(lines)
+    }
+
+    pub fn update_game_accuracy(
+        &mut self,
+        game_id: &str,
+        overall: f32,
+        opening: f32,
+        middlegame: f32,
+        endgame: f32,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE games SET accuracy_overall = ?1, accuracy_opening = ?2,
+                 accuracy_middlegame = ?3, accuracy_endgame = ?4 WHERE id = ?5",
+                rusqlite::params![overall, opening, middlegame, endgame, game_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn get_unreviewed_games_count(&self) -> Result<u32, String> {
@@ -251,6 +319,84 @@ impl SqliteStore {
         ).unwrap_or(1500);
         Ok(rating)
     }
+
+    pub fn is_game_synced(&self, game_id: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM lichess_sync WHERE game_id = ?1",
+                rusqlite::params![game_id],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    pub fn mark_game_synced(&mut self, game_id: &str, synced_at: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO lichess_sync (game_id, synced_at) VALUES (?1, ?2)",
+                rusqlite::params![game_id, synced_at],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn insert_puzzle(&mut self, puzzle: &PuzzleRecord) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO puzzles (id, fen, solution_uci, theme, difficulty)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    puzzle.id,
+                    puzzle.fen,
+                    puzzle.solution_uci,
+                    puzzle.theme,
+                    puzzle.difficulty
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_next_puzzle(&self, max_difficulty: i32) -> Result<Option<PuzzleRecord>, String> {
+        let result = self.conn.query_row(
+            "SELECT id, fen, solution_uci, theme, difficulty FROM puzzles
+             WHERE difficulty <= ?1
+             ORDER BY RANDOM() LIMIT 1",
+            rusqlite::params![max_difficulty],
+            |row| {
+                Ok(PuzzleRecord {
+                    id: row.get(0)?,
+                    fen: row.get(1)?,
+                    solution_uci: row.get(2)?,
+                    theme: row.get(3)?,
+                    difficulty: row.get(4)?,
+                })
+            },
+        );
+        match result {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn run_migrations(&mut self) -> Result<(), String> {
+        let migrations = [
+            "ALTER TABLE opening_lines ADD COLUMN srs_interval REAL DEFAULT 1.0",
+            "ALTER TABLE opening_lines ADD COLUMN srs_ease REAL DEFAULT 2.5",
+            "ALTER TABLE opening_lines ADD COLUMN srs_reps INTEGER DEFAULT 0",
+            "ALTER TABLE opening_lines ADD COLUMN srs_due_date TEXT DEFAULT ''",
+            "ALTER TABLE games ADD COLUMN accuracy_overall REAL",
+            "ALTER TABLE games ADD COLUMN accuracy_opening REAL",
+            "ALTER TABLE games ADD COLUMN accuracy_middlegame REAL",
+            "ALTER TABLE games ADD COLUMN accuracy_endgame REAL",
+        ];
+        for sql in &migrations {
+            // Ignore "duplicate column" errors — migration already applied
+            let _ = self.conn.execute(sql, []);
+        }
+        Ok(())
+    }
 }
 
 impl TrainingStore for SqliteStore {
@@ -264,12 +410,17 @@ impl TrainingStore for SqliteStore {
     fn insert_opening_line(&mut self, line: &OpeningLineRecord) -> Result<(), String> {
         let line_uci_str = serialize_line_uci(&line.line_uci);
         self.conn.execute(
-            "INSERT INTO opening_lines (id, user_id, opening_name, start_fen, line_uci, source, confidence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO opening_lines (id, user_id, opening_name, start_fen, line_uci, source, confidence,
+                                        srs_interval, srs_ease, srs_reps, srs_due_date)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
                 confidence = excluded.confidence,
                 line_uci = excluded.line_uci,
-                opening_name = excluded.opening_name",
+                opening_name = excluded.opening_name,
+                srs_interval = excluded.srs_interval,
+                srs_ease = excluded.srs_ease,
+                srs_reps = excluded.srs_reps,
+                srs_due_date = excluded.srs_due_date",
             rusqlite::params![
                 line.id,
                 line.user_id,
@@ -277,7 +428,11 @@ impl TrainingStore for SqliteStore {
                 line.start_fen,
                 line_uci_str,
                 line.source,
-                line.confidence
+                line.confidence,
+                line.srs_interval,
+                line.srs_ease,
+                line.srs_reps,
+                line.srs_due_date
             ],
         ).map_err(|e| e.to_string())?;
         Ok(())
@@ -350,10 +505,27 @@ mod tests {
         assert!(!schema_bootstrap_statements().is_empty());
     }
 
+    fn make_opening_line(id: &str) -> OpeningLineRecord {
+        OpeningLineRecord {
+            id: id.to_string(),
+            user_id: "u1".to_string(),
+            opening_name: "Ruy Lopez".to_string(),
+            start_fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1".to_string(),
+            line_uci: vec!["e7e5".to_string()],
+            source: "manual".to_string(),
+            confidence: 0.0,
+            srs_interval: 1.0,
+            srs_ease: 2.5,
+            srs_reps: 0,
+            srs_due_date: String::new(),
+        }
+    }
+
     #[test]
     fn sqlite_store_flow() {
         let mut store = SqliteStore::new_in_memory().unwrap();
         store.bootstrap().unwrap();
+        store.run_migrations().unwrap();
 
         let game = GameRecord {
             id: "game1".to_string(),
@@ -389,5 +561,50 @@ mod tests {
 
         let unreviewed = store.get_unreviewed_games_count().unwrap();
         assert_eq!(unreviewed, 1);
+    }
+
+    #[test]
+    fn dedup_lichess_sync() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+
+        assert!(!store.is_game_synced("abc123"));
+        store.mark_game_synced("abc123", "2026-06-12").unwrap();
+        assert!(store.is_game_synced("abc123"));
+        store.mark_game_synced("abc123", "2026-06-12").unwrap(); // idempotent
+    }
+
+    #[test]
+    fn puzzle_insert_and_fetch() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+
+        let puzzle = PuzzleRecord {
+            id: "puzzle1".to_string(),
+            fen: "r1bqkb1r/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3".to_string(),
+            solution_uci: "d8f6".to_string(),
+            theme: "fork".to_string(),
+            difficulty: 1400,
+        };
+        store.insert_puzzle(&puzzle).unwrap();
+
+        let fetched = store.get_next_puzzle(1600).unwrap().expect("should have puzzle");
+        assert_eq!(fetched.id, "puzzle1");
+        assert!(store.get_next_puzzle(1000).unwrap().is_none());
+    }
+
+    #[test]
+    fn srs_due_lines_query() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+        store.run_migrations().unwrap();
+
+        let mut line = make_opening_line("line1");
+        line.srs_due_date = "2026-06-10".to_string();
+        store.insert_opening_line(&line).unwrap();
+
+        let due = store.get_due_opening_lines("u1", "2026-06-12").unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "line1");
     }
 }
