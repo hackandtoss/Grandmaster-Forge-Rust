@@ -119,6 +119,26 @@ slint::slint! {
         in-out property <string> sync-status: "Not synced";
         in-out property <string> tree-status: "";
 
+        // Repertoire builder state
+        in-out property <string> builder-fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        in-out property <string> builder-moves: "";
+        in-out property <string> builder-color: "White";
+        in-out property <string> builder-line-name: "";
+        in-out property <int> builder-selected-square: -1;
+        in-out property <[string]> builder-board-pieces: [
+            "♜","♞","♝","♛","♚","♝","♞","♜",
+            "♟","♟","♟","♟","♟","♟","♟","♟",
+            "","","","","","","","",
+            "","","","","","","","",
+            "","","","","","","","",
+            "","","","","","","","",
+            "♙","♙","♙","♙","♙","♙","♙","♙",
+            "♖","♘","♗","♕","♔","♗","♘","♖"
+        ];
+
+        // Drill branch info
+        in-out property <string> drill-branch-info: "";
+
         // Callbacks
         callback select-screen(string);
         callback import-pgn(string);
@@ -131,6 +151,14 @@ slint::slint! {
         callback build-opening-tree();
         callback load-puzzle();
         callback explorer-select-move(string);
+
+        // Repertoire builder callbacks
+        callback builder-click-square(int);
+        callback builder-save-line();
+        callback builder-reset();
+        callback builder-set-color(string);
+        callback builder-undo();
+        callback suggest-pgn-lines();
 
         HorizontalLayout {
             // Sidebar
@@ -171,6 +199,11 @@ slint::slint! {
                             text: "Game Review";
                             active: root.active-screen == "review";
                             clicked => { root.select-screen("review"); }
+                        }
+                        SidebarButton {
+                            text: "Opening Builder";
+                            active: root.active-screen == "builder";
+                            clicked => { root.select-screen("builder"); }
                         }
                     }
                 }
@@ -685,6 +718,142 @@ slint::slint! {
                         }
                     }
                 }
+
+                // 4. Opening Builder Screen
+                if (root.active-screen == "builder") : HorizontalLayout {
+                    spacing: 16px;
+                    padding: 0px;
+
+                    // Left: board + controls
+                    VerticalLayout {
+                        width: 480px;
+                        spacing: 12px;
+
+                        // Color picker
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Train as:"; color: #a1a1aa; font-size: 13px; vertical-alignment: center; }
+                            Rectangle {
+                                width: 80px; height: 32px;
+                                background: root.builder-color == "White" ? #6d28d9 : #27272a;
+                                border-radius: 6px;
+                                TouchArea { clicked => { root.builder-set-color("White"); } }
+                                Text { text: "White"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                width: 80px; height: 32px;
+                                background: root.builder-color == "Black" ? #6d28d9 : #27272a;
+                                border-radius: 6px;
+                                TouchArea { clicked => { root.builder-set-color("Black"); } }
+                                Text { text: "Black"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+
+                        // 8×8 board
+                        Rectangle {
+                            width: 360px;
+                            height: 360px;
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #3f3f46;
+                            border-width: 2px;
+
+                            for index in 64: Rectangle {
+                                x: mod(index, 8) * 45px;
+                                y: floor(index / 8) * 45px;
+                                width: 45px;
+                                height: 45px;
+                                background: (root.builder-selected-square == index)
+                                    ? #7c3aed
+                                    : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
+                                Text {
+                                    text: root.builder-board-pieces[index];
+                                    font-size: 28px;
+                                    color: #000000;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                TouchArea {
+                                    clicked => { root.builder-click-square(index); }
+                                }
+                            }
+                        }
+
+                        // Undo / Reset buttons
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                height: 36px; border-radius: 6px; background: #374151;
+                                TouchArea { clicked => { root.builder-undo(); } }
+                                Text { text: "Undo"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                height: 36px; border-radius: 6px; background: #374151;
+                                TouchArea { clicked => { root.builder-reset(); } }
+                                Text { text: "Reset"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                    }
+
+                    // Right: line name + move list + save + PGN suggest
+                    VerticalLayout {
+                        spacing: 12px;
+                        alignment: start;
+
+                        Text { text: "Line Name"; color: #a1a1aa; font-size: 12px; }
+                        LineEdit {
+                            height: 36px;
+                            placeholder-text: "e.g. Ruy Lopez — White";
+                            text <=> root.builder-line-name;
+                        }
+
+                        Text { text: "Moves Staged"; color: #a1a1aa; font-size: 12px; }
+                        Rectangle {
+                            height: 120px;
+                            background: #1c1c1e;
+                            border-radius: 8px;
+                            border-color: #3f3f46;
+                            border-width: 1px;
+                            Text {
+                                text: root.builder-moves == "" ? "Play moves on the board…" : root.builder-moves;
+                                color: root.builder-moves == "" ? #71717a : #e4e4e7;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // Save button
+                        Rectangle {
+                            height: 42px;
+                            background: @linear-gradient(90deg, #6d28d9, #4f46e5);
+                            border-radius: 8px;
+                            TouchArea { clicked => { root.builder-save-line(); } }
+                            Text {
+                                text: "Save Line to Repertoire";
+                                color: white;
+                                font-size: 14px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Suggest from PGN
+                        Rectangle {
+                            height: 36px;
+                            background: #27272a;
+                            border-radius: 8px;
+                            TouchArea { clicked => { root.suggest-pgn-lines(); } }
+                            Text {
+                                text: "Suggest Lines from Last PGN";
+                                color: #a78bfa;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -794,8 +963,15 @@ struct AppState {
     drill_line: Option<OpeningLineRecord>,
     drill_moves_left: Vec<String>,
     drill_chess: Chess,
+    // Branch quizzing: first-move options valid at current drill position
+    drill_valid_first_moves: Vec<String>,
     // Current board FEN for explorer
     current_fen: Option<String>,
+    // Repertoire builder state
+    builder_chess: Chess,
+    builder_staged_uci: Vec<String>,
+    builder_selected_sq: Option<usize>,
+    builder_color: String,
 }
 
 fn main() {
@@ -814,7 +990,12 @@ fn main() {
         drill_line: None,
         drill_moves_left: Vec::new(),
         drill_chess: Chess::default(),
+        drill_valid_first_moves: Vec::new(),
         current_fen: None,
+        builder_chess: Chess::default(),
+        builder_staged_uci: Vec::new(),
+        builder_selected_sq: None,
+        builder_color: "White".to_string(),
     }));
 
     let app = AppWindow::new().expect("failed to create Slint window");
@@ -1012,14 +1193,58 @@ fn main() {
             let app = app_weak.upgrade().unwrap();
 
             if let Some(line) = state.drill_line.clone() {
-                app.set_drill_active(true);
-                app.set_drill_instructions(slint::SharedString::from("Make the first move of the repertoire line!"));
-                
-                state.drill_moves_left = line.line_uci.clone();
-                let fen = &line.start_fen;
+                let fen = line.start_fen.clone();
                 let parsed_fen: shakmaty::fen::Fen = fen.parse().unwrap();
                 state.drill_chess = parsed_fen.into_position(CastlingMode::Standard).unwrap();
-                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(fen_to_pieces(fen)))));
+
+                // Load all sibling lines from the same start position for branch quizzing
+                let siblings = state.db
+                    .get_lines_from_position(&fen, "default_user")
+                    .unwrap_or_default();
+                let branch_count = siblings.len().max(1);
+                // Collect every distinct first move across all branches
+                state.drill_valid_first_moves = siblings.iter()
+                    .filter_map(|l| l.line_uci.first().cloned())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+
+                app.set_drill_active(true);
+                app.set_drill_branch_info(slint::SharedString::from(
+                    format!("{} branch(es) at this position", branch_count),
+                ));
+
+                // Color-aware: if this is a Black line, auto-play White's first move
+                if line.side == "Black" && !line.line_uci.is_empty() {
+                    use shakmaty::{Position};
+                    use shakmaty::uci::Uci;
+                    let white_move = &line.line_uci[0];
+                    if let Ok(uci_move) = white_move.parse::<Uci>() {
+                        if let Ok(m) = uci_move.to_move(&state.drill_chess) {
+                            state.drill_chess.play_unchecked(&m);
+                            state.drill_moves_left = line.line_uci[1..].to_vec();
+                            // Recalculate valid first moves after white's move
+                            state.drill_valid_first_moves = state.drill_moves_left
+                                .first().cloned().into_iter().collect();
+                            let new_fen = shakmaty::fen::Fen::from_position(
+                                state.drill_chess.clone(), shakmaty::EnPassantMode::Always,
+                            ).to_string();
+                            app.set_board_pieces(slint::ModelRc::from(Rc::new(
+                                slint::VecModel::from(fen_to_pieces(&new_fen))
+                            )));
+                            app.set_drill_instructions(slint::SharedString::from(
+                                "White played. Now respond as Black!",
+                            ));
+                            return;
+                        }
+                    }
+                }
+
+                state.drill_moves_left = line.line_uci.clone();
+                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(fen_to_pieces(&fen)))));
+                app.set_drill_instructions(slint::SharedString::from(
+                    "Make your first move!",
+                ));
             }
         });
     }
@@ -1053,8 +1278,18 @@ fn main() {
                 }
 
                 let next_correct_move = state.drill_moves_left[0].clone();
+                // At the first move, accept any branch from the repertoire
+                let is_correct = if !state.drill_valid_first_moves.is_empty()
+                    && state.drill_moves_left.len() == state.drill_line.as_ref().map(|l| l.line_uci.len()).unwrap_or(0)
+                {
+                    state.drill_valid_first_moves.iter().any(|m| {
+                        *m == uci_try || *m == format!("{}q", uci_try)
+                    })
+                } else {
+                    uci_try == next_correct_move || format!("{}q", uci_try) == next_correct_move
+                };
 
-                if uci_try == next_correct_move || format!("{}q", uci_try) == next_correct_move {
+                if is_correct {
                     // Correct! Play the move
                     let san: San = next_correct_move.parse().unwrap_or_else(|_| {
                         // fallback to parse uci as move directly via Uci
@@ -1345,6 +1580,7 @@ fn main() {
                                     srs_ease: 2.5,
                                     srs_reps: 0,
                                     srs_due_date: String::new(),
+                                    side: "White".to_string(),
                                 };
                                 let mut state = state_thread.lock().unwrap();
                                 let _ = state.db.insert_opening_line(&line_record);
@@ -1517,6 +1753,230 @@ fn main() {
                         pieces.iter().map(|s| slint::SharedString::from(s.as_str())).collect::<Vec<_>>(),
                     )));
                 }
+            }
+        });
+    }
+
+    // ── Repertoire Builder callbacks ─────────────────────────────────────────
+
+    // builder-click-square: two-click move entry on the builder board
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_builder_click_square(move |sq_idx: i32| {
+            let sq = sq_idx as usize;
+            let mut st = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+
+            if let Some(from) = st.builder_selected_sq {
+                // Second click: attempt the move
+                let from_sq = index_to_square(from);
+                let to_sq = index_to_square(sq);
+                let uci = format!("{}{}", from_sq, to_sq);
+                use shakmaty::{CastlingMode, EnPassantMode, Position};
+                use shakmaty::uci::Uci;
+                let uci_move: Uci = match uci.parse() {
+                    Ok(u) => u,
+                    Err(_) => { st.builder_selected_sq = None; app.set_builder_selected_square(-1); return; }
+                };
+                match uci_move.to_move(&st.builder_chess) {
+                    Ok(m) => {
+                        st.builder_chess.play_unchecked(&m);
+                        st.builder_staged_uci.push(uci.clone());
+                        let new_fen = shakmaty::fen::Fen::from_position(
+                            st.builder_chess.clone(), EnPassantMode::Always,
+                        ).to_string();
+                        let pieces = fen_to_pieces(&new_fen);
+                        app.set_builder_board_pieces(slint::ModelRc::from(
+                            Rc::new(slint::VecModel::from(pieces)),
+                        ));
+                        app.set_builder_fen(slint::SharedString::from(new_fen));
+                        app.set_builder_moves(slint::SharedString::from(
+                            st.builder_staged_uci.join(" "),
+                        ));
+                    }
+                    Err(_) => {}
+                }
+                st.builder_selected_sq = None;
+                app.set_builder_selected_square(-1);
+            } else {
+                // First click: select a piece
+                st.builder_selected_sq = Some(sq);
+                app.set_builder_selected_square(sq_idx);
+            }
+        });
+    }
+
+    // builder-undo: pop last staged move and rebuild position from scratch
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_builder_undo(move || {
+            let mut st = state.lock().unwrap();
+            if st.builder_staged_uci.pop().is_none() { return; }
+            // Rebuild position from start
+            use shakmaty::{CastlingMode, Position};
+            use shakmaty::uci::Uci;
+            let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+            let parsed: shakmaty::fen::Fen = start_fen.parse().unwrap();
+            let mut pos: shakmaty::Chess = parsed.into_position(CastlingMode::Standard).unwrap();
+            for uci_str in &st.builder_staged_uci {
+                if let Ok(uci_move) = uci_str.parse::<Uci>() {
+                    if let Ok(m) = uci_move.to_move(&pos) {
+                        pos.play_unchecked(&m);
+                    }
+                }
+            }
+            st.builder_chess = pos;
+            let new_fen = shakmaty::fen::Fen::from_position(
+                st.builder_chess.clone(), shakmaty::EnPassantMode::Always,
+            ).to_string();
+            let app = app_weak.upgrade().unwrap();
+            let pieces = fen_to_pieces(&new_fen);
+            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(pieces))));
+            app.set_builder_fen(slint::SharedString::from(new_fen));
+            app.set_builder_moves(slint::SharedString::from(st.builder_staged_uci.join(" ")));
+            app.set_builder_selected_square(-1);
+            st.builder_selected_sq = None;
+        });
+    }
+
+    // builder-reset: clear staged moves and board
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_builder_reset(move || {
+            let mut st = state.lock().unwrap();
+            st.builder_chess = shakmaty::Chess::default();
+            st.builder_staged_uci.clear();
+            st.builder_selected_sq = None;
+            let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+            let app = app_weak.upgrade().unwrap();
+            let pieces = fen_to_pieces(start_fen);
+            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(pieces))));
+            app.set_builder_fen(slint::SharedString::from(start_fen));
+            app.set_builder_moves(slint::SharedString::from(""));
+            app.set_builder_line_name(slint::SharedString::from(""));
+            app.set_builder_selected_square(-1);
+        });
+    }
+
+    // builder-set-color
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_builder_set_color(move |color: slint::SharedString| {
+            let mut st = state.lock().unwrap();
+            st.builder_color = color.to_string();
+            drop(st);
+            let app = app_weak.upgrade().unwrap();
+            app.set_builder_color(color);
+        });
+    }
+
+    // builder-save-line: persist current staged line to DB
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh_data_save = refresh_data.clone();
+        app.on_builder_save_line(move || {
+            let mut st = state.lock().unwrap();
+            if st.builder_staged_uci.is_empty() { return; }
+            let app = app_weak.upgrade().unwrap();
+            let name = app.get_builder_line_name().to_string();
+            let name = if name.trim().is_empty() {
+                format!("{} Line {}", st.builder_color, uuid_now())
+            } else {
+                name
+            };
+            let line = OpeningLineRecord {
+                id: format!("builder_{}", uuid_now()),
+                user_id: "default_user".to_string(),
+                opening_name: name,
+                start_fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string(),
+                line_uci: st.builder_staged_uci.clone(),
+                source: "builder".to_string(),
+                confidence: 0.0,
+                srs_interval: 1.0,
+                srs_ease: 2.5,
+                srs_reps: 0,
+                srs_due_date: String::new(),
+                side: st.builder_color.clone(),
+            };
+            let _ = st.db.insert_opening_line(&line);
+            // Reset builder after save
+            st.builder_chess = shakmaty::Chess::default();
+            st.builder_staged_uci.clear();
+            st.builder_selected_sq = None;
+            drop(st);
+            app.set_builder_moves(slint::SharedString::from(""));
+            app.set_builder_line_name(slint::SharedString::from(""));
+            app.set_drill_instructions(slint::SharedString::from("Line saved!"));
+            let pieces = fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(pieces))));
+            refresh_data_save();
+        });
+    }
+
+    // suggest-pgn-lines: extract opening moves from the most recent imported game
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_suggest_pgn_lines(move || {
+            let st = state.lock().unwrap();
+            let games = st.db.get_games().unwrap_or_default();
+            drop(st);
+            let app = app_weak.upgrade().unwrap();
+            if let Some(game) = games.first() {
+                // Parse PGN, convert first 15 SAN moves to UCI
+                let parsed = pgn_processor::parse_pgn(&game.pgn);
+                use shakmaty::{CastlingMode, Position};
+                use shakmaty::san::San;
+                let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+                let parsed_start: shakmaty::fen::Fen = start_fen.parse().unwrap();
+                let mut suggest_pos: shakmaty::Chess = parsed_start.into_position(CastlingMode::Standard).unwrap();
+                let mut first_15: Vec<String> = Vec::new();
+                for san_str in parsed.moves.iter().take(15) {
+                    let san_str = san_str.trim_end_matches(['?', '!', '+', '#']);
+                    if let Ok(san) = san_str.parse::<San>() {
+                        if let Ok(m) = san.to_move(&suggest_pos) {
+                            let uci = shakmaty::uci::Uci::from_move(&m, shakmaty::CastlingMode::Standard);
+                            first_15.push(uci.to_string());
+                            suggest_pos.play_unchecked(&m);
+                        } else { break; }
+                    } else { break; }
+                }
+                if !first_15.is_empty() {
+                    app.set_builder_moves(slint::SharedString::from(first_15.join(" ")));
+                    app.set_builder_line_name(slint::SharedString::from(
+                        format!("{} vs {} (opening)", game.white, game.black),
+                    ));
+                    // Load the suggested moves into builder state
+                    let mut st2 = state.lock().unwrap();
+                    use shakmaty::{CastlingMode, Position};
+                    use shakmaty::uci::Uci;
+                    let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+                    let parsed_fen: shakmaty::fen::Fen = start_fen.parse().unwrap();
+                    let mut pos: shakmaty::Chess = parsed_fen.into_position(CastlingMode::Standard).unwrap();
+                    let mut valid: Vec<String> = Vec::new();
+                    for uci_str in &first_15 {
+                        if let Ok(uci_move) = uci_str.parse::<Uci>() {
+                            if let Ok(m) = uci_move.to_move(&pos) {
+                                pos.play_unchecked(&m);
+                                valid.push(uci_str.clone());
+                            } else { break; }
+                        } else { break; }
+                    }
+                    st2.builder_chess = pos.clone();
+                    st2.builder_staged_uci = valid;
+                    drop(st2);
+                    let fen = shakmaty::fen::Fen::from_position(pos, shakmaty::EnPassantMode::Always).to_string();
+                    let pieces = fen_to_pieces(&fen);
+                    app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(pieces))));
+                    app.set_builder_fen(slint::SharedString::from(fen));
+                }
+            } else {
+                app.set_builder_line_name(slint::SharedString::from("No games imported yet"));
             }
         });
     }

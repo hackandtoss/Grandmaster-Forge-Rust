@@ -91,6 +91,7 @@ pub struct OpeningLineRecord {
     pub srs_ease: f32,
     pub srs_reps: u32,
     pub srs_due_date: String,
+    pub side: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,7 +240,8 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(
             "SELECT id, user_id, opening_name, start_fen, line_uci, source, confidence,
                     COALESCE(srs_interval, 1.0), COALESCE(srs_ease, 2.5),
-                    COALESCE(srs_reps, 0), COALESCE(srs_due_date, '')
+                    COALESCE(srs_reps, 0), COALESCE(srs_due_date, ''),
+                    COALESCE(side, 'White')
              FROM opening_lines WHERE user_id = ?1",
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map([user_id], |row| {
@@ -256,6 +258,7 @@ impl SqliteStore {
                 srs_ease: row.get::<_, f64>(8).unwrap_or(2.5) as f32,
                 srs_reps: row.get::<_, u32>(9).unwrap_or(0),
                 srs_due_date: row.get::<_, String>(10).unwrap_or_default(),
+                side: row.get::<_, String>(11).unwrap_or_else(|_| "White".to_string()),
             })
         }).map_err(|e| e.to_string())?;
         let mut lines = Vec::new();
@@ -265,11 +268,40 @@ impl SqliteStore {
         Ok(lines)
     }
 
+    pub fn get_lines_from_position(&self, start_fen: &str, user_id: &str) -> Result<Vec<OpeningLineRecord>, String> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, user_id, opening_name, start_fen, line_uci, source, confidence,
+                    COALESCE(srs_interval, 1.0), COALESCE(srs_ease, 2.5),
+                    COALESCE(srs_reps, 0), COALESCE(srs_due_date, ''),
+                    COALESCE(side, 'White')
+             FROM opening_lines WHERE start_fen = ?1 AND user_id = ?2",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![start_fen, user_id], |row| {
+            let line_uci_str: String = row.get(4)?;
+            Ok(OpeningLineRecord {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                opening_name: row.get(2)?,
+                start_fen: row.get(3)?,
+                line_uci: parse_line_uci(&line_uci_str),
+                source: row.get(5)?,
+                confidence: row.get(6)?,
+                srs_interval: row.get::<_, f64>(7).unwrap_or(1.0) as f32,
+                srs_ease: row.get::<_, f64>(8).unwrap_or(2.5) as f32,
+                srs_reps: row.get::<_, u32>(9).unwrap_or(0),
+                srs_due_date: row.get::<_, String>(10).unwrap_or_default(),
+                side: row.get::<_, String>(11).unwrap_or_else(|_| "White".to_string()),
+            })
+        }).map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     pub fn get_due_opening_lines(&self, user_id: &str, today: &str) -> Result<Vec<OpeningLineRecord>, String> {
         let mut stmt = self.conn.prepare(
             "SELECT id, user_id, opening_name, start_fen, line_uci, source, confidence,
                     COALESCE(srs_interval, 1.0), COALESCE(srs_ease, 2.5),
-                    COALESCE(srs_reps, 0), COALESCE(srs_due_date, '')
+                    COALESCE(srs_reps, 0), COALESCE(srs_due_date, ''),
+                    COALESCE(side, 'White')
              FROM opening_lines
              WHERE user_id = ?1 AND (srs_due_date IS NULL OR srs_due_date = '' OR srs_due_date <= ?2)
              ORDER BY srs_due_date ASC",
@@ -288,6 +320,7 @@ impl SqliteStore {
                 srs_ease: row.get::<_, f64>(8).unwrap_or(2.5) as f32,
                 srs_reps: row.get::<_, u32>(9).unwrap_or(0),
                 srs_due_date: row.get::<_, String>(10).unwrap_or_default(),
+                side: row.get::<_, String>(11).unwrap_or_else(|_| "White".to_string()),
             })
         }).map_err(|e| e.to_string())?;
         let mut lines = Vec::new();
@@ -472,6 +505,7 @@ impl SqliteStore {
             "ALTER TABLE opening_lines ADD COLUMN srs_ease REAL DEFAULT 2.5",
             "ALTER TABLE opening_lines ADD COLUMN srs_reps INTEGER DEFAULT 0",
             "ALTER TABLE opening_lines ADD COLUMN srs_due_date TEXT DEFAULT ''",
+            "ALTER TABLE opening_lines ADD COLUMN side TEXT DEFAULT 'White'",
             "ALTER TABLE games ADD COLUMN accuracy_overall REAL",
             "ALTER TABLE games ADD COLUMN accuracy_opening REAL",
             "ALTER TABLE games ADD COLUMN accuracy_middlegame REAL",
@@ -497,8 +531,8 @@ impl TrainingStore for SqliteStore {
         let line_uci_str = serialize_line_uci(&line.line_uci);
         self.conn.execute(
             "INSERT INTO opening_lines (id, user_id, opening_name, start_fen, line_uci, source, confidence,
-                                        srs_interval, srs_ease, srs_reps, srs_due_date)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                                        srs_interval, srs_ease, srs_reps, srs_due_date, side)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 confidence = excluded.confidence,
                 line_uci = excluded.line_uci,
@@ -506,7 +540,8 @@ impl TrainingStore for SqliteStore {
                 srs_interval = excluded.srs_interval,
                 srs_ease = excluded.srs_ease,
                 srs_reps = excluded.srs_reps,
-                srs_due_date = excluded.srs_due_date",
+                srs_due_date = excluded.srs_due_date,
+                side = excluded.side",
             rusqlite::params![
                 line.id,
                 line.user_id,
@@ -518,7 +553,8 @@ impl TrainingStore for SqliteStore {
                 line.srs_interval,
                 line.srs_ease,
                 line.srs_reps,
-                line.srs_due_date
+                line.srs_due_date,
+                line.side
             ],
         ).map_err(|e| e.to_string())?;
         Ok(())
@@ -604,6 +640,7 @@ mod tests {
             srs_ease: 2.5,
             srs_reps: 0,
             srs_due_date: String::new(),
+            side: "White".to_string(),
         }
     }
 
