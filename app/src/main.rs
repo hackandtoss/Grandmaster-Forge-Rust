@@ -895,19 +895,6 @@ fn index_to_square(idx: usize) -> String {
     format!("{}{}", file, rank)
 }
 
-fn square_to_index(sq: &str) -> Option<usize> {
-    if sq.len() < 2 {
-        return None;
-    }
-    let chars: Vec<char> = sq.chars().collect();
-    let col = (chars[0] as u8).checked_sub(b'a')? as usize;
-    let row = (b'8').checked_sub(chars[1] as u8)? as usize;
-    if col < 8 && row < 8 {
-        Some(row * 8 + col)
-    } else {
-        None
-    }
-}
 
 // Compute dynamic centipawn loss and mistake class
 fn score_to_centipawns(score: engine_controller::Score) -> i32 {
@@ -1560,6 +1547,24 @@ fn main() {
                     }
                 }
 
+                // Compute and persist phase-based accuracy
+                let acc_input: Vec<(u32, Option<i32>)> = positions
+                    .iter()
+                    .zip(losses.iter())
+                    .map(|(pos, &loss)| (pos.ply, Some(loss)))
+                    .collect();
+                let acc = accuracy::compute_game_accuracy(&acc_input);
+                {
+                    let mut state = state_thread.lock().unwrap();
+                    let _ = state.db.update_game_accuracy(
+                        &game_id_thread,
+                        acc.overall,
+                        acc.opening,
+                        acc.middlegame,
+                        acc.endgame,
+                    );
+                }
+
                 // Identify first critical mistake
                 if let Some(critical) = pgn_processor::first_critical_mistake(&parsed_moves, &losses) {
                     // Look up FEN of the blunder position
@@ -1706,7 +1711,7 @@ fn main() {
         let state = state.clone();
         let app_weak = app_weak.clone();
         app.on_load_puzzle(move || {
-            let mut st = state.lock().unwrap();
+            let st = state.lock().unwrap();
             if let Ok(Some(puzzle)) = st.db.get_next_puzzle(2000) {
                 let fen = puzzle.fen.clone();
                 drop(st);
@@ -1773,7 +1778,7 @@ fn main() {
                 let from_sq = index_to_square(from);
                 let to_sq = index_to_square(sq);
                 let uci = format!("{}{}", from_sq, to_sq);
-                use shakmaty::{CastlingMode, EnPassantMode, Position};
+                use shakmaty::{EnPassantMode, Position};
                 use shakmaty::uci::Uci;
                 let uci_move: Uci = match uci.parse() {
                     Ok(u) => u,
