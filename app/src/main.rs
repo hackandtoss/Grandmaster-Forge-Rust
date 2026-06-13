@@ -1298,7 +1298,34 @@ fn uuid_now() -> String {
 }
 
 fn local_now_str() -> String {
-    "2026-06-12".to_string()
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = secs / 86400;
+    let (y, m, d) = days_to_ymd(days);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut year = 1970u64;
+    loop {
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let days_in_year = if leap { 366 } else { 365 };
+        if days < days_in_year { break; }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 1u64;
+    for md in &month_days {
+        if days < *md { break; }
+        days -= *md;
+        month += 1;
+    }
+    (year, month, days + 1)
 }
 
 // Temporary alias to bridge name discrepancy in shakmaty FEN parsing

@@ -1,10 +1,12 @@
 [workspace]
+resolver = "2"
 members = [
     "engine_controller",
     "pgn_processor",
     "mastery_ui",
     "db_manager",
     "app",
+    "lichess_client",
 ]
 
 # Add any common workspace settings here
