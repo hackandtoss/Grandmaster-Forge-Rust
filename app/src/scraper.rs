@@ -107,25 +107,40 @@ pub fn select_adoption_moves(
 }
 
 /// Walk the masters explorer from start_fen, returning (parent_fen, uci) pairs to adopt.
+///
+/// A depth-8 walk can issue on the order of a hundred explorer requests, so a
+/// transient failure or HTTP 429 partway through is expected rather than
+/// exceptional. Rather than discarding everything collected so far, the walk
+/// stops early and returns whatever pairs it already gathered alongside the
+/// stop reason: `None` if the frontier was fully exhausted, or
+/// `Some(error_string)` if a fetch error cut the walk short.
 pub async fn adopt_explorer_lines(
     client: &lichess_client::LichessClient,
     start_fen: &str,
     my_side: &str,
     depth: u32,
     top_n: usize,
-) -> Result<Vec<(String, String)>, String> {
+) -> (Vec<(String, String)>, Option<String>) {
     use shakmaty::{CastlingMode, Position};
     let mut out: Vec<(String, String)> = Vec::new();
     // frontier of (full_fen, remaining_depth)
     let mut frontier: Vec<(String, u32)> = vec![(start_fen.to_string(), depth)];
+    let mut stop_reason: Option<String> = None;
     while let Some((fen, remaining)) = frontier.pop() {
         if remaining == 0 { continue; }
-        let resp = client.explorer_masters(&fen).await?;
+        let resp = match client.explorer_masters(&fen).await {
+            Ok(r) => r,
+            Err(e) => {
+                stop_reason = Some(e);
+                break;
+            }
+        };
         if resp.moves.is_empty() { continue; }
-        let parsed: shakmaty::fen::Fen = fen.parse().map_err(|e| format!("{e}"))?;
-        let pos: shakmaty::Chess = parsed
-            .into_position(CastlingMode::Standard)
-            .map_err(|e| format!("{e}"))?;
+        let parsed: shakmaty::fen::Fen = match fen.parse() { Ok(f) => f, Err(_) => continue };
+        let pos: shakmaty::Chess = match parsed.into_position(CastlingMode::Standard) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
         let is_my_turn = (pos.turn() == shakmaty::Color::White) == (my_side == "White");
         for uci_str in select_adoption_moves(&resp.moves, is_my_turn, top_n) {
             let uci: shakmaty::uci::Uci = match uci_str.parse() { Ok(u) => u, Err(_) => continue };
@@ -136,7 +151,7 @@ pub async fn adopt_explorer_lines(
             frontier.push((next_fen, remaining - 1));
         }
     }
-    Ok(out)
+    (out, stop_reason)
 }
 
 #[cfg(test)]

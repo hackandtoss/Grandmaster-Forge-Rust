@@ -2061,20 +2061,27 @@ fn main() {
                 let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
                 let client = lichess_client::LichessClient::new(&token);
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let msg = match rt.block_on(scraper::adopt_explorer_lines(&client, &start_fen, &side, 8, 3)) {
-                    Ok(pairs) => {
-                        let mut st = state.lock().unwrap();
-                        let mut new_edges = 0u32;
-                        for (parent_fen, uci) in &pairs {
-                            if let Ok((_, _, was_new)) =
-                                tree::add_move_edge(&mut st.db, parent_fen, uci, &side, "explorer")
-                            {
+                let (pairs, stop_reason) =
+                    rt.block_on(scraper::adopt_explorer_lines(&client, &start_fen, &side, 8, 3));
+                let msg = {
+                    let mut st = state.lock().unwrap();
+                    let mut new_edges = 0u32;
+                    for (parent_fen, uci) in &pairs {
+                        match tree::add_move_edge(&mut st.db, parent_fen, uci, &side, "explorer") {
+                            Ok((_, _, was_new)) => {
                                 if was_new { new_edges += 1; }
                             }
+                            Err(e) => {
+                                eprintln!("adopt: failed to insert edge {parent_fen} {uci}: {e}");
+                            }
                         }
-                        format!("Adopted {new_edges} new move(s) from master games.")
                     }
-                    Err(e) => format!("Adopt failed: {e}"),
+                    match stop_reason {
+                        None => format!("Adopted {new_edges} new move(s) from master games."),
+                        Some(reason) => format!(
+                            "Adopted {new_edges} new move(s) — stopped early: {reason}"
+                        ),
+                    }
                 };
                 let aw = app_weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
