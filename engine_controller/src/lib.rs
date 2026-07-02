@@ -234,7 +234,7 @@ impl PlaySession {
                 return Err("engine exited during play".to_string());
             }
             let line = buf.trim();
-            if line.starts_with("bestmove ") {
+            if line == "bestmove" || line.starts_with("bestmove ") {
                 return line
                     .split_whitespace()
                     .nth(1)
