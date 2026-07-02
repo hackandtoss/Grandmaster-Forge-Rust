@@ -76,6 +76,39 @@ CREATE TABLE IF NOT EXISTS training_events (
     created_at TEXT NOT NULL
 );
 "#,
+    r#"
+CREATE TABLE IF NOT EXISTS repertoire_nodes (
+    id INTEGER PRIMARY KEY,
+    fen TEXT NOT NULL,
+    side TEXT NOT NULL CHECK (side IN ('White','Black')),
+    UNIQUE (fen, side)
+);
+"#,
+    r#"
+CREATE TABLE IF NOT EXISTS repertoire_moves (
+    id INTEGER PRIMARY KEY,
+    parent_id INTEGER NOT NULL REFERENCES repertoire_nodes(id),
+    child_id INTEGER NOT NULL REFERENCES repertoire_nodes(id),
+    uci TEXT NOT NULL,
+    san TEXT NOT NULL,
+    is_my_move INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    comment TEXT,
+    srs_interval REAL DEFAULT 1.0,
+    srs_ease REAL DEFAULT 2.5,
+    srs_reps INTEGER DEFAULT 0,
+    srs_due_date TEXT DEFAULT '',
+    UNIQUE (parent_id, uci)
+);
+"#,
+    r#"
+CREATE TABLE IF NOT EXISTS game_sync (
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    synced_at TEXT NOT NULL,
+    PRIMARY KEY (source, external_id)
+);
+"#,
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,6 +183,23 @@ pub struct OpeningNode {
     pub white_wins: i64,
     pub draws: i64,
     pub black_wins: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepertoireMoveRecord {
+    pub id: i64,
+    pub parent_id: i64,
+    pub child_id: i64,
+    pub uci: String,
+    pub san: String,
+    pub is_my_move: bool,
+    pub source: String,
+    pub comment: Option<String>,
+    pub srs_interval: f32,
+    pub srs_ease: f32,
+    pub srs_reps: u32,
+    pub srs_due_date: String,
+    pub parent_fen: String,
 }
 
 pub trait TrainingStore {
@@ -517,6 +567,185 @@ impl SqliteStore {
         }
         Ok(())
     }
+
+    fn map_rep_move(row: &rusqlite::Row) -> rusqlite::Result<RepertoireMoveRecord> {
+        Ok(RepertoireMoveRecord {
+            id: row.get(0)?,
+            parent_id: row.get(1)?,
+            child_id: row.get(2)?,
+            uci: row.get(3)?,
+            san: row.get(4)?,
+            is_my_move: row.get::<_, i64>(5)? != 0,
+            source: row.get(6)?,
+            comment: row.get(7)?,
+            srs_interval: row.get::<_, f64>(8)? as f32,
+            srs_ease: row.get::<_, f64>(9)? as f32,
+            srs_reps: row.get::<_, i64>(10)? as u32,
+            srs_due_date: row.get(11)?,
+            parent_fen: row.get(12)?,
+        })
+    }
+
+    const REP_MOVE_COLS: &'static str =
+        "m.id, m.parent_id, m.child_id, m.uci, m.san, m.is_my_move, m.source, m.comment, \
+         COALESCE(m.srs_interval, 1.0), COALESCE(m.srs_ease, 2.5), \
+         COALESCE(m.srs_reps, 0), COALESCE(m.srs_due_date, ''), n.fen";
+
+    pub fn ensure_repertoire_node(&mut self, fen: &str, side: &str) -> Result<i64, String> {
+        let norm = normalize_fen(fen);
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO repertoire_nodes (fen, side) VALUES (?1, ?2)",
+                rusqlite::params![norm, side],
+            )
+            .map_err(|e| e.to_string())?;
+        self.conn
+            .query_row(
+                "SELECT id FROM repertoire_nodes WHERE fen = ?1 AND side = ?2",
+                rusqlite::params![norm, side],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn insert_repertoire_move(
+        &mut self,
+        parent_id: i64,
+        child_id: i64,
+        uci: &str,
+        san: &str,
+        is_my_move: bool,
+        source: &str,
+    ) -> Result<(i64, bool), String> {
+        let inserted = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO repertoire_moves
+                 (parent_id, child_id, uci, san, is_my_move, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![parent_id, child_id, uci, san, is_my_move as i64, source],
+            )
+            .map_err(|e| e.to_string())?;
+        let id: i64 = self
+            .conn
+            .query_row(
+                "SELECT id FROM repertoire_moves WHERE parent_id = ?1 AND uci = ?2",
+                rusqlite::params![parent_id, uci],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok((id, inserted > 0))
+    }
+
+    pub fn get_repertoire_moves_from(
+        &self,
+        fen: &str,
+        side: &str,
+    ) -> Result<Vec<RepertoireMoveRecord>, String> {
+        let norm = normalize_fen(fen);
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {} FROM repertoire_moves m
+                 JOIN repertoire_nodes n ON n.id = m.parent_id
+                 WHERE n.fen = ?1 AND n.side = ?2",
+                Self::REP_MOVE_COLS
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![norm, side], Self::map_rep_move)
+            .map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn get_due_repertoire_moves(&self, today: &str) -> Result<Vec<RepertoireMoveRecord>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {} FROM repertoire_moves m
+                 JOIN repertoire_nodes n ON n.id = m.parent_id
+                 WHERE m.is_my_move = 1
+                   AND (m.srs_due_date IS NULL OR m.srs_due_date = '' OR m.srs_due_date <= ?1)
+                 ORDER BY m.srs_due_date ASC",
+                Self::REP_MOVE_COLS
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![today], Self::map_rep_move)
+            .map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn get_due_repertoire_move_count(&self, today: &str) -> Result<u32, String> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM repertoire_moves
+                 WHERE is_my_move = 1
+                   AND (srs_due_date IS NULL OR srs_due_date = '' OR srs_due_date <= ?1)",
+                rusqlite::params![today],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn update_repertoire_move_srs(
+        &mut self,
+        move_id: i64,
+        interval: f32,
+        ease: f32,
+        reps: u32,
+        due_date: &str,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE repertoire_moves
+                 SET srs_interval = ?1, srs_ease = ?2, srs_reps = ?3, srs_due_date = ?4
+                 WHERE id = ?5",
+                rusqlite::params![interval, ease, reps, due_date, move_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_repertoire_move(&self, move_id: i64) -> Result<Option<RepertoireMoveRecord>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {} FROM repertoire_moves m
+                 JOIN repertoire_nodes n ON n.id = m.parent_id
+                 WHERE m.id = ?1",
+                Self::REP_MOVE_COLS
+            ))
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query_map(rusqlite::params![move_id], Self::map_rep_move)
+            .map_err(|e| e.to_string())?;
+        match rows.next() {
+            Some(Ok(r)) => Ok(Some(r)),
+            Some(Err(e)) => Err(e.to_string()),
+            None => Ok(None),
+        }
+    }
+
+    pub fn is_synced(&self, source: &str, external_id: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM game_sync WHERE source = ?1 AND external_id = ?2",
+                rusqlite::params![source, external_id],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    pub fn mark_synced(&mut self, source: &str, external_id: &str, synced_at: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO game_sync (source, external_id, synced_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![source, external_id, synced_at],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 impl TrainingStore for SqliteStore {
@@ -608,6 +837,12 @@ pub fn serialize_line_uci(moves: &[String]) -> String {
 
 pub fn parse_line_uci(line: &str) -> Vec<String> {
     line.split_whitespace().map(|m| m.to_string()).collect()
+}
+
+/// Normalize a FEN for transposition keys: keep board/side/castling/ep, zero the clocks.
+pub fn normalize_fen(fen: &str) -> String {
+    let fields: Vec<&str> = fen.split_whitespace().take(4).collect();
+    format!("{} 0 1", fields.join(" "))
 }
 
 #[cfg(test)]
@@ -754,5 +989,87 @@ mod tests {
         let due = store.get_due_opening_lines("u1", "2026-06-12").unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, "line1");
+    }
+
+    #[test]
+    fn normalize_fen_drops_clocks() {
+        let fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 3 7";
+        assert_eq!(
+            normalize_fen(fen),
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+        );
+    }
+
+    #[test]
+    fn repertoire_tree_insert_and_lookup() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+
+        let start = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        let after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1";
+
+        let root = store.ensure_repertoire_node(start, "White").unwrap();
+        let child = store.ensure_repertoire_node(after_e4, "White").unwrap();
+        assert_ne!(root, child);
+        // idempotent: same fen+side returns same id
+        assert_eq!(store.ensure_repertoire_node(start, "White").unwrap(), root);
+        // same fen, other side is a different node
+        assert_ne!(store.ensure_repertoire_node(start, "Black").unwrap(), root);
+
+        let (edge, was_new) = store
+            .insert_repertoire_move(root, child, "e2e4", "e4", true, "manual")
+            .unwrap();
+        assert!(was_new);
+        let (edge2, was_new2) = store
+            .insert_repertoire_move(root, child, "e2e4", "e4", true, "pgn")
+            .unwrap();
+        assert_eq!(edge, edge2);
+        assert!(!was_new2);
+
+        let moves = store.get_repertoire_moves_from(start, "White").unwrap();
+        assert_eq!(moves.len(), 1);
+        assert_eq!(moves[0].uci, "e2e4");
+        assert_eq!(moves[0].san, "e4");
+        assert!(moves[0].is_my_move);
+        assert_eq!(moves[0].parent_fen, start);
+        assert_eq!(moves[0].srs_due_date, "");
+        assert!(store.get_repertoire_moves_from(after_e4, "White").unwrap().is_empty());
+    }
+
+    #[test]
+    fn due_moves_and_srs_update() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+        let a = store.ensure_repertoire_node("fenA w KQkq - 0 1", "White").unwrap();
+        let b = store.ensure_repertoire_node("fenB b KQkq - 0 1", "White").unwrap();
+        let c = store.ensure_repertoire_node("fenC w KQkq - 0 1", "White").unwrap();
+        let (mine, _) = store.insert_repertoire_move(a, b, "e2e4", "e4", true, "manual").unwrap();
+        let (_theirs, _) = store.insert_repertoire_move(b, c, "e7e5", "e5", false, "manual").unwrap();
+
+        // '' due date counts as due; opponent edges never appear
+        let due = store.get_due_repertoire_moves("2026-07-01").unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, mine);
+        assert_eq!(store.get_due_repertoire_move_count("2026-07-01").unwrap(), 1);
+
+        store.update_repertoire_move_srs(mine, 6.0, 2.6, 2, "2026-07-10").unwrap();
+        assert!(store.get_due_repertoire_moves("2026-07-01").unwrap().is_empty());
+        let rec = store.get_repertoire_move(mine).unwrap().unwrap();
+        assert!((rec.srs_interval - 6.0).abs() < 0.01);
+        assert_eq!(rec.srs_reps, 2);
+        assert_eq!(rec.srs_due_date, "2026-07-10");
+        // due again on its due date
+        assert_eq!(store.get_due_repertoire_moves("2026-07-10").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn game_sync_dedup_per_source() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+        assert!(!store.is_synced("chesscom", "g1"));
+        store.mark_synced("chesscom", "g1", "2026-07-01").unwrap();
+        assert!(store.is_synced("chesscom", "g1"));
+        assert!(!store.is_synced("lichess", "g1")); // keyed by (source, id)
+        store.mark_synced("chesscom", "g1", "2026-07-01").unwrap(); // idempotent
     }
 }
