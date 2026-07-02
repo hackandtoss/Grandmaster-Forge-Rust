@@ -1554,7 +1554,10 @@ fn main() {
                             });
                             match ingest_pgn_game(&mut st.db, &format!("lichess_{}", g.id), "lichess", &pgn, date) {
                                 Ok(()) => new_count += 1,
-                                Err(_) => skipped += 1,
+                                Err(e) => {
+                                    eprintln!("sync: failed to ingest lichess game {}: {e}", g.id);
+                                    skipped += 1;
+                                }
                             }
                             let _ = st.db.mark_synced("lichess", &g.id, &tree::local_now_str());
                         }
@@ -1622,7 +1625,10 @@ fn main() {
                             });
                             match ingest_pgn_game(&mut st.db, &format!("chesscom_{ext_id}"), "chesscom", &pgn, date) {
                                 Ok(()) => new_count += 1,
-                                Err(_) => skipped += 1,
+                                Err(e) => {
+                                    eprintln!("sync: failed to ingest chesscom game {ext_id}: {e}");
+                                    skipped += 1;
+                                }
                             }
                             let _ = st.db.mark_synced("chesscom", &ext_id, &tree::local_now_str());
                             if new_count >= 50 { break 'outer; }
