@@ -1,11 +1,5 @@
 pub const SQLITE_SCHEMA: &[&str] = &[
     r#"
-CREATE TABLE IF NOT EXISTS lichess_sync (
-    game_id TEXT PRIMARY KEY,
-    synced_at TEXT NOT NULL
-);
-"#,
-    r#"
 CREATE TABLE IF NOT EXISTS opening_tree (
     id TEXT PRIMARY KEY,
     parent_id TEXT,
@@ -435,23 +429,11 @@ impl SqliteStore {
     }
 
     pub fn is_game_synced(&self, game_id: &str) -> bool {
-        self.conn
-            .query_row(
-                "SELECT 1 FROM lichess_sync WHERE game_id = ?1",
-                rusqlite::params![game_id],
-                |_| Ok(()),
-            )
-            .is_ok()
+        self.is_synced("lichess", game_id)
     }
 
     pub fn mark_game_synced(&mut self, game_id: &str, synced_at: &str) -> Result<(), String> {
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO lichess_sync (game_id, synced_at) VALUES (?1, ?2)",
-                rusqlite::params![game_id, synced_at],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        self.mark_synced("lichess", game_id, synced_at)
     }
 
     pub fn insert_puzzle(&mut self, puzzle: &PuzzleRecord) -> Result<(), String> {
@@ -565,7 +547,42 @@ impl SqliteStore {
             // Ignore "duplicate column" errors — migration already applied
             let _ = self.conn.execute(sql, []);
         }
+
+        // Move lichess_sync rows into the per-source game_sync ledger, then drop it.
+        let has_old: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lichess_sync'",
+            [], |row| row.get(0),
+        ).unwrap_or(0);
+        if has_old > 0 {
+            let _ = self.conn.execute(
+                "INSERT OR IGNORE INTO game_sync (source, external_id, synced_at)
+                 SELECT 'lichess', game_id, synced_at FROM lichess_sync", []);
+            let _ = self.conn.execute("DROP TABLE lichess_sync", []);
+        }
+
         Ok(())
+    }
+
+    pub fn opening_lines_table_exists(&self) -> bool {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='opening_lines'",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) > 0
+    }
+
+    pub fn retire_opening_lines(&mut self) -> Result<(), String> {
+        if self.opening_lines_table_exists() {
+            self.conn
+                .execute("ALTER TABLE opening_lines RENAME TO opening_lines_legacy", [])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn repertoire_move_count(&self) -> Result<u32, String> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM repertoire_moves", [], |row| row.get(0))
+            .map_err(|e| e.to_string())
     }
 
     fn map_rep_move(row: &rusqlite::Row) -> rusqlite::Result<RepertoireMoveRecord> {
@@ -1071,5 +1088,32 @@ mod tests {
         assert!(store.is_synced("chesscom", "g1"));
         assert!(!store.is_synced("lichess", "g1")); // keyed by (source, id)
         store.mark_synced("chesscom", "g1", "2026-07-01").unwrap(); // idempotent
+    }
+
+    #[test]
+    fn lichess_sync_migrates_to_game_sync() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+        store.mark_game_synced("oldgame", "2026-06-01").unwrap();
+        store.run_migrations().unwrap();
+        assert!(store.is_synced("lichess", "oldgame"));
+        // lichess_sync table is gone
+        let gone: bool = store.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lichess_sync'",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap() == 0;
+        assert!(gone);
+        store.run_migrations().unwrap(); // idempotent
+    }
+
+    #[test]
+    fn retire_opening_lines_renames_table() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+        assert!(store.opening_lines_table_exists());
+        store.retire_opening_lines().unwrap();
+        assert!(!store.opening_lines_table_exists());
+        store.retire_opening_lines().unwrap(); // idempotent, no error
+        assert_eq!(store.repertoire_move_count().unwrap(), 0);
     }
 }
