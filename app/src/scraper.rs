@@ -92,3 +92,66 @@ fn apply_uci_to_fen(fen: &str, uci: &str) -> Result<String, String> {
     let next_pos = pos.play(&m).map_err(|e| format!("play error: {e}"))?;
     Ok(Fen::from_position(next_pos, EnPassantMode::Always).to_string())
 }
+
+/// Pick which explorer moves to adopt at this node.
+/// My turn: the single most-played move. Opponent turn: the top_n most-played.
+pub fn select_adoption_moves(
+    moves: &[lichess_client::explorer::ExplorerMove],
+    is_my_turn: bool,
+    top_n: usize,
+) -> Vec<String> {
+    let mut sorted: Vec<&lichess_client::explorer::ExplorerMove> = moves.iter().collect();
+    sorted.sort_by_key(|m| std::cmp::Reverse(m.white + m.draws + m.black));
+    let take = if is_my_turn { 1 } else { top_n };
+    sorted.into_iter().take(take).map(|m| m.uci.clone()).collect()
+}
+
+/// Walk the masters explorer from start_fen, returning (parent_fen, uci) pairs to adopt.
+pub async fn adopt_explorer_lines(
+    client: &lichess_client::LichessClient,
+    start_fen: &str,
+    my_side: &str,
+    depth: u32,
+    top_n: usize,
+) -> Result<Vec<(String, String)>, String> {
+    use shakmaty::{CastlingMode, Position};
+    let mut out: Vec<(String, String)> = Vec::new();
+    // frontier of (full_fen, remaining_depth)
+    let mut frontier: Vec<(String, u32)> = vec![(start_fen.to_string(), depth)];
+    while let Some((fen, remaining)) = frontier.pop() {
+        if remaining == 0 { continue; }
+        let resp = client.explorer_masters(&fen).await?;
+        if resp.moves.is_empty() { continue; }
+        let parsed: shakmaty::fen::Fen = fen.parse().map_err(|e| format!("{e}"))?;
+        let pos: shakmaty::Chess = parsed
+            .into_position(CastlingMode::Standard)
+            .map_err(|e| format!("{e}"))?;
+        let is_my_turn = (pos.turn() == shakmaty::Color::White) == (my_side == "White");
+        for uci_str in select_adoption_moves(&resp.moves, is_my_turn, top_n) {
+            let uci: shakmaty::uci::Uci = match uci_str.parse() { Ok(u) => u, Err(_) => continue };
+            let m = match uci.to_move(&pos) { Ok(m) => m, Err(_) => continue };
+            let next = match pos.clone().play(&m) { Ok(p) => p, Err(_) => continue };
+            let next_fen = shakmaty::fen::Fen::from_position(next, shakmaty::EnPassantMode::Legal).to_string();
+            out.push((fen.clone(), uci_str));
+            frontier.push((next_fen, remaining - 1));
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adoption_selection_respects_turn() {
+        use lichess_client::explorer::ExplorerMove;
+        let mk = |uci: &str, games: i64| ExplorerMove {
+            uci: uci.into(), san: uci.into(),
+            white: games, draws: 0, black: 0, average_rating: None,
+        };
+        let moves = vec![mk("e2e4", 100), mk("d2d4", 300), mk("c2c4", 50)];
+        assert_eq!(select_adoption_moves(&moves, true, 3), vec!["d2d4"]);
+        assert_eq!(select_adoption_moves(&moves, false, 2), vec!["d2d4", "e2e4"]);
+    }
+}
