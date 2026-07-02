@@ -119,6 +119,26 @@ pub fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     (year, month, days + 1)
 }
 
+/// Insert pre-walked PGN moves (parent/child fens already normalized). Returns NEW edge count.
+pub fn import_walked(
+    db: &mut SqliteStore,
+    walked: &[pgn_processor::WalkedMove],
+    side: &str,
+    source: &str,
+) -> Result<u32, String> {
+    let mut new_edges = 0u32;
+    for w in walked {
+        let mover_is_white = w.parent_fen.split_whitespace().nth(1) == Some("w");
+        let is_my_move = (side == "White") == mover_is_white;
+        let parent_id = db.ensure_repertoire_node(&w.parent_fen, side)?;
+        let child_id = db.ensure_repertoire_node(&w.child_fen, side)?;
+        let (_, was_new) =
+            db.insert_repertoire_move(parent_id, child_id, &w.uci, &w.san, is_my_move, source)?;
+        if was_new { new_edges += 1; }
+    }
+    Ok(new_edges)
+}
+
 /// One-time migration from opening_lines. Idempotent:
 /// skips when the tree already has rows or the legacy table is gone.
 pub fn migrate_legacy_lines(db: &mut SqliteStore) -> Result<u32, String> {
@@ -238,6 +258,22 @@ mod tests {
         assert_eq!(edges[0].srs_due_date, "2026-07-10");
         // second run is a no-op
         assert_eq!(migrate_legacy_lines(&mut db).unwrap(), 0);
+    }
+
+    #[test]
+    fn import_walked_inserts_edges_with_ownership() {
+        let mut db = mem_store();
+        let pgn = "[Event \"R\"]\n\n1. e4 e5 (1... c5) 2. Nf3 *";
+        let walked = pgn_processor::walk_pgn_variations(pgn).unwrap();
+        let n = import_walked(&mut db, &walked, "White", "pgn").unwrap();
+        assert_eq!(n, 4);
+        let start_edges = db.get_repertoire_moves_from(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "White").unwrap();
+        assert_eq!(start_edges.len(), 1); // e4, my move
+        assert!(start_edges[0].is_my_move);
+        let after_e4 = db.get_repertoire_moves_from(&walked[0].child_fen, "White").unwrap();
+        assert_eq!(after_e4.len(), 2); // e5 and c5, opponent moves
+        assert!(after_e4.iter().all(|e| !e.is_my_move));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 slint::slint! {
-    import { Button, ScrollView, LineEdit } from "std-widgets.slint";
+    import { Button, ScrollView, LineEdit, TextEdit } from "std-widgets.slint";
 
     struct GameEntry {
         id: string,
@@ -139,8 +139,14 @@ slint::slint! {
         // Drill branch info
         in-out property <string> drill-branch-info: "";
 
+        // Import Lines screen state
+        in-out property <string> import-status: "";
+        in-out property <string> import-side: "White";
+
         // Callbacks
         callback select-screen(string);
+        callback import-lines(string, string);
+        callback sync-studies(string);
         callback import-pgn(string);
         callback select-game(string);
         callback select-game-move(int);
@@ -204,6 +210,11 @@ slint::slint! {
                             text: "Opening Builder";
                             active: root.active-screen == "builder";
                             clicked => { root.select-screen("builder"); }
+                        }
+                        SidebarButton {
+                            text: "Import Lines";
+                            active: root.active-screen == "import";
+                            clicked => { root.select-screen("import"); }
                         }
                     }
                 }
@@ -853,6 +864,47 @@ slint::slint! {
                             }
                         }
                     }
+                }
+
+                // 5. Import Lines Screen
+                if (root.active-screen == "import") : VerticalLayout {
+                    spacing: 16px;
+                    alignment: start;
+                    Text { text: "Import Repertoire Lines"; color: #ffffff; font-size: 18px; font-weight: 700; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Repertoire side:"; color: #a1a1aa; font-size: 13px; vertical-alignment: center; }
+                        Rectangle {
+                            width: 80px; height: 32px;
+                            background: root.import-side == "White" ? #6d28d9 : #27272a;
+                            border-radius: 6px;
+                            TouchArea { clicked => { root.import-side = "White"; } }
+                            Text { text: "White"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        Rectangle {
+                            width: 80px; height: 32px;
+                            background: root.import-side == "Black" ? #6d28d9 : #27272a;
+                            border-radius: 6px;
+                            TouchArea { clicked => { root.import-side = "Black"; } }
+                            Text { text: "Black"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                    import-input := TextEdit {
+                        height: 260px;
+                        placeholder-text: "Paste PGN here — variations included. Multiple games OK.";
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Button {
+                            text: "Import PGN Lines";
+                            clicked => { root.import-lines(import-input.text, root.import-side); import-input.text = ""; }
+                        }
+                        Button {
+                            text: "Sync My Lichess Studies";
+                            clicked => { root.sync-studies(root.import-side); }
+                        }
+                    }
+                    Text { text: root.import-status; color: #a78bfa; font-size: 13px; }
                 }
             }
         }
@@ -1793,6 +1845,80 @@ fn main() {
             } else {
                 app.set_builder_line_name(slint::SharedString::from("No games imported yet"));
             }
+        });
+    }
+
+    // Import pasted PGN with variations into the tree
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh = refresh_data.clone();
+        app.on_import_lines(move |pgn: slint::SharedString, side: slint::SharedString| {
+            let app = app_weak.upgrade().unwrap();
+            if pgn.trim().is_empty() {
+                app.set_import_status(slint::SharedString::from("Nothing to import."));
+                return;
+            }
+            let walked = match pgn_processor::walk_pgn_variations(&pgn) {
+                Ok(w) => w,
+                Err(e) => { app.set_import_status(slint::SharedString::from(format!("Parse error: {e}"))); return; }
+            };
+            let total = walked.len();
+            let mut st = state.lock().unwrap();
+            match tree::import_walked(&mut st.db, &walked, &side, "pgn") {
+                Ok(n) => {
+                    drop(st);
+                    app.set_import_status(slint::SharedString::from(
+                        format!("Imported {n} new move(s) ({total} parsed) into {side} repertoire.")));
+                    refresh();
+                }
+                Err(e) => app.set_import_status(slint::SharedString::from(format!("Import failed: {e}"))),
+            }
+        });
+    }
+
+    // Sync Lichess studies into the tree
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh = refresh_data.clone();
+        app.on_sync_studies(move |side: slint::SharedString| {
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            let refresh = refresh.clone();
+            let side = side.to_string();
+            std::thread::spawn(move || {
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_import_status(slint::SharedString::from("Fetching studies…"));
+                    }
+                });
+                let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
+                let username = std::env::var("LICHESS_USERNAME").unwrap_or_else(|_| "hackandtoss".into());
+                let client = lichess_client::LichessClient::new(&token);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let msg = match rt.block_on(client.fetch_studies_pgn(&username)) {
+                    Ok(pgn_text) => match pgn_processor::walk_pgn_variations(&pgn_text) {
+                        Ok(walked) => {
+                            let mut st = state.lock().unwrap();
+                            match tree::import_walked(&mut st.db, &walked, &side, "study") {
+                                Ok(n) => format!("Studies: {n} new move(s) imported."),
+                                Err(e) => format!("Study import failed: {e}"),
+                            }
+                        }
+                        Err(e) => format!("Study parse failed: {e}"),
+                    },
+                    Err(e) => format!("Studies fetch failed: {e}"),
+                };
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_import_status(slint::SharedString::from(msg));
+                    }
+                    refresh();
+                });
+            });
         });
     }
 
