@@ -198,7 +198,7 @@ pub fn walk_pgn_variations(text: &str) -> Result<Vec<WalkedMove>, String> {
             .lines()
             .filter(|l| !l.trim_start().starts_with('['))
             .collect::<Vec<_>>()
-            .join(" ");
+            .join("\n");
 
         let mut pos = Chess::default();
         let mut prev: Option<Chess> = None;
@@ -222,15 +222,21 @@ pub fn walk_pgn_variations(text: &str) -> Result<Vec<WalkedMove>, String> {
                 return;
             }
             let t = raw.trim_end_matches(['?', '!']);
-            if t.is_empty()
-                || t.starts_with('$')
-                || (t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && t.contains('.'))
-                || matches!(t, "1-0" | "0-1" | "1/2-1/2" | "*")
-                || t.chars().all(|c| c.is_ascii_digit())
-            {
+            if t.is_empty() || t.starts_with('$') || matches!(t, "1-0" | "0-1" | "1/2-1/2" | "*") {
                 return;
             }
-            match t.parse::<San>() {
+            // Strip an unspaced move-number prefix ("1." / "12..." / bare "1") so
+            // tokens like "1.e4" or "12...Nf6" still yield their SAN move.
+            let after_digits = t.trim_start_matches(|c: char| c.is_ascii_digit());
+            let stripped = if after_digits.len() != t.len() {
+                after_digits.trim_start_matches('.')
+            } else {
+                t
+            };
+            if stripped.is_empty() || stripped.chars().all(|c| c.is_ascii_digit()) {
+                return;
+            }
+            match stripped.parse::<San>() {
                 Ok(san) => match san.to_move(pos) {
                     Ok(m) => {
                         let parent = position_key(pos);
@@ -399,5 +405,23 @@ mod tests {
         assert_eq!(walked.len(), 3);
         assert_eq!(walked[0].san, "e4");
         assert_eq!(walked[1].san, "e5");
+    }
+
+    #[test]
+    fn semicolon_comment_skips_only_to_end_of_line() {
+        let pgn = "[Event \"X\"]\n\n1. e4 e5 ; best by test\n2. Nf3 Nc6 1-0";
+        let walked = walk_pgn_variations(pgn).unwrap();
+        assert_eq!(walked.len(), 4);
+        assert_eq!(walked[2].san, "Nf3");
+        assert_eq!(walked[3].san, "Nc6");
+    }
+
+    #[test]
+    fn unspaced_move_numbers_keep_the_move() {
+        let pgn = "[Event \"X\"]\n\n1.e4 e5 2.Nf3 1-0";
+        let walked = walk_pgn_variations(pgn).unwrap();
+        assert_eq!(walked.len(), 3);
+        let sans: Vec<&str> = walked.iter().map(|w| w.san.as_str()).collect();
+        assert_eq!(sans, vec!["e4", "e5", "Nf3"]);
     }
 }
