@@ -1424,7 +1424,7 @@ fn main() {
                     if let Ok(analysis) = eval_res {
                         if !analysis.variations.is_empty() {
                             let best_score = score_to_centipawns(analysis.variations[0].score);
-                            
+
                             // Find played move score
                             let played_score = if analysis.bestmove == pos.played_move {
                                 best_score
@@ -1454,13 +1454,15 @@ fn main() {
                             losses.push(loss);
 
                             let class = engine_controller::classify_centipawn_loss(loss).map(|c| format!("{:?}", c));
-                            
+
                             // Write result back
                             let mut state = state_thread.lock().unwrap();
                             let mut updated_pos = pos.clone();
                             updated_pos.centipawn_loss = Some(loss);
                             updated_pos.mistake_class = class;
                             let _ = state.db.insert_position(&updated_pos);
+                        } else {
+                            losses.push(0);
                         }
                     } else {
                         losses.push(0);
@@ -1506,45 +1508,49 @@ fn main() {
                         {
                             let best = root_analysis.bestmove.clone();
                             let mut st = state_thread.lock().unwrap();
-                            if let Ok((_, after_best, _)) =
-                                tree::add_move_edge(&mut st.db, &pos_record.fen, &best, &side, "mistake")
+                            match tree::add_move_edge(&mut st.db, &pos_record.fen, &best, &side, "mistake")
                             {
-                                drop(st);
-                                // 2) top-3 opponent replies
-                                if let Ok(reply_analysis) =
-                                    sf.analyze_fen(&after_best, AnalysisConfig { depth: 10, multipv: 3 })
-                                {
-                                    let mut seen = std::collections::HashSet::new();
-                                    for var in reply_analysis.variations.iter().take(3) {
-                                        let Some(reply) = var.pv.first() else { continue };
-                                        if !seen.insert(reply.clone()) { continue; }
-                                        let mut st = state_thread.lock().unwrap();
-                                        let Ok((_, after_reply, _)) = tree::add_move_edge(
-                                            &mut st.db, &after_best, reply, &side, "mistake",
-                                        ) else { continue };
-                                        drop(st);
-                                        // 3) my best follow-up to each reply
-                                        if let Ok(fu) = sf.analyze_fen(
-                                            &after_reply, AnalysisConfig { depth: 10, multipv: 1 },
-                                        ) {
+                                Ok((_, after_best, _)) => {
+                                    drop(st);
+                                    // 2) top-3 opponent replies
+                                    if let Ok(reply_analysis) =
+                                        sf.analyze_fen(&after_best, AnalysisConfig { depth: 10, multipv: 3 })
+                                    {
+                                        let mut seen = std::collections::HashSet::new();
+                                        for var in reply_analysis.variations.iter().take(3) {
+                                            let Some(reply) = var.pv.first() else { continue };
+                                            if !seen.insert(reply.clone()) { continue; }
                                             let mut st = state_thread.lock().unwrap();
-                                            let _ = tree::add_move_edge(
-                                                &mut st.db, &after_reply, &fu.bestmove, &side, "mistake",
-                                            );
+                                            let Ok((_, after_reply, _)) = tree::add_move_edge(
+                                                &mut st.db, &after_best, reply, &side, "mistake",
+                                            ) else { continue };
+                                            drop(st);
+                                            // 3) my best follow-up to each reply
+                                            if let Ok(fu) = sf.analyze_fen(
+                                                &after_reply, AnalysisConfig { depth: 10, multipv: 1 },
+                                            ) {
+                                                let mut st = state_thread.lock().unwrap();
+                                                let _ = tree::add_move_edge(
+                                                    &mut st.db, &after_reply, &fu.bestmove, &side, "mistake",
+                                                );
+                                            }
                                         }
                                     }
+                                    let mut st = state_thread.lock().unwrap();
+                                    let event = TrainingEventRecord {
+                                        id: format!("evt_{}", uuid_now()),
+                                        user_id: "default_user".to_string(),
+                                        kind: "mistake_tree".to_string(),
+                                        target_id: game_id_thread.clone(),
+                                        outcome: format!("worst drop {loss}cp at ply {}", pos_record.ply),
+                                        score_delta: 0.0,
+                                        created_at: tree::local_now_str(),
+                                    };
+                                    let _ = st.db.insert_training_event(&event);
                                 }
-                                let mut st = state_thread.lock().unwrap();
-                                let event = TrainingEventRecord {
-                                    id: format!("evt_{}", uuid_now()),
-                                    user_id: "default_user".to_string(),
-                                    kind: "mistake_tree".to_string(),
-                                    target_id: game_id_thread.clone(),
-                                    outcome: format!("worst drop {loss}cp at ply {}", pos_record.ply),
-                                    score_delta: 0.0,
-                                    created_at: tree::local_now_str(),
-                                };
-                                let _ = st.db.insert_training_event(&event);
+                                Err(e) => {
+                                    eprintln!("mistake-tree: failed to insert correction edge for game {}: {}", game_id_thread, e);
+                                }
                             }
                         }
                     }
