@@ -744,6 +744,19 @@ impl SqliteStore {
         }
     }
 
+    /// Look up a repertoire node's side and (normalized) FEN by id.
+    pub fn get_node_side_and_fen(&self, node_id: i64) -> Result<Option<(String, String)>, String> {
+        match self.conn.query_row(
+            "SELECT side, fen FROM repertoire_nodes WHERE id = ?1",
+            rusqlite::params![node_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     pub fn is_synced(&self, source: &str, external_id: &str) -> bool {
         self.conn
             .query_row(
@@ -1051,6 +1064,13 @@ mod tests {
         assert_eq!(moves[0].parent_fen, start);
         assert_eq!(moves[0].srs_due_date, "");
         assert!(store.get_repertoire_moves_from(after_e4, "White").unwrap().is_empty());
+
+        // node side + fen round-trips; missing id yields None
+        assert_eq!(
+            store.get_node_side_and_fen(root).unwrap(),
+            Some(("White".to_string(), normalize_fen(start)))
+        );
+        assert_eq!(store.get_node_side_and_fen(999_999).unwrap(), None);
     }
 
     #[test]

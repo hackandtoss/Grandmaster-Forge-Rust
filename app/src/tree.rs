@@ -62,6 +62,63 @@ pub fn import_uci_line(
     Ok(new_edges)
 }
 
+/// Apply an SM-2 grade to a single repertoire edge and persist the new schedule.
+/// `today_days` is epoch-days; the next due date is `today + max(interval, 1)` days.
+pub fn grade_edge(
+    db: &mut SqliteStore,
+    edge: &db_manager::RepertoireMoveRecord,
+    grade: u32,
+    today_days: u64,
+) -> Result<(), String> {
+    let card = crate::srs::SrsCard {
+        interval: edge.srs_interval,
+        ease_factor: edge.srs_ease,
+        repetitions: edge.srs_reps,
+    };
+    let next = crate::srs::review(&card, grade);
+    let (y, m, d) = days_to_ymd(today_days + next.interval.max(1.0) as u64);
+    db.update_repertoire_move_srs(
+        edge.id,
+        next.interval,
+        next.ease_factor,
+        next.repetitions,
+        &format!("{:04}-{:02}-{:02}", y, m, d),
+    )
+}
+
+/// Today's date as `YYYY-MM-DD` from the system clock (epoch-days math).
+pub fn local_now_str() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = secs / 86400;
+    let (y, m, d) = days_to_ymd(days);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// Convert epoch-days into a (year, month, day) triple (proleptic Gregorian from 1970).
+pub fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut year = 1970u64;
+    loop {
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let days_in_year = if leap { 366 } else { 365 };
+        if days < days_in_year { break; }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 1u64;
+    for md in &month_days {
+        if days < *md { break; }
+        days -= *md;
+        month += 1;
+    }
+    (year, month, days + 1)
+}
+
 /// One-time migration from opening_lines. Idempotent:
 /// skips when the tree already has rows or the legacy table is gone.
 pub fn migrate_legacy_lines(db: &mut SqliteStore) -> Result<u32, String> {
@@ -181,5 +238,21 @@ mod tests {
         assert_eq!(edges[0].srs_due_date, "2026-07-10");
         // second run is a no-op
         assert_eq!(migrate_legacy_lines(&mut db).unwrap(), 0);
+    }
+
+    #[test]
+    fn grade_edge_pass_and_fail() {
+        let mut db = mem_store();
+        let (id, _, _) = add_move_edge(&mut db, START, "e2e4", "White", "manual").unwrap();
+        let edge = db.get_repertoire_move(id).unwrap().unwrap();
+        // 2026-07-01 is day 20635 since epoch
+        grade_edge(&mut db, &edge, 5, 20635).unwrap();
+        let after = db.get_repertoire_move(id).unwrap().unwrap();
+        assert_eq!(after.srs_reps, 1);
+        assert_eq!(after.srs_due_date, "2026-07-02"); // interval 1 day
+        grade_edge(&mut db, &after, 1, 20635).unwrap();
+        let failed = db.get_repertoire_move(id).unwrap().unwrap();
+        assert_eq!(failed.srs_reps, 0);
+        assert_eq!(failed.srs_due_date, "2026-07-02"); // reset to 1 day
     }
 }

@@ -4,10 +4,9 @@ mod weakness;
 mod scraper;
 mod tree;
 
-use db_manager::{GameRecord, OpeningLineRecord, PositionRecord, SqliteStore, TrainingEventRecord, TrainingStore};
+use db_manager::{GameRecord, PositionRecord, SqliteStore, TrainingEventRecord, TrainingStore};
 use engine_controller::{AnalysisConfig, StockfishEngine};
 use shakmaty::{CastlingMode, Chess, Position};
-use shakmaty::san::San;
 use shakmaty::uci::Uci;
 use slint::Model;
 use std::sync::{Arc, Mutex};
@@ -947,12 +946,12 @@ fn find_stockfish_path() -> String {
 struct AppState {
     db: SqliteStore,
     stockfish_path: String,
-    // Active drill moves & position
-    drill_line: Option<OpeningLineRecord>,
-    drill_moves_left: Vec<String>,
-    drill_chess: Chess,
-    // Branch quizzing: first-move options valid at current drill position
-    drill_valid_first_moves: Vec<String>,
+    // Tree-based drill session
+    drill_side: String,                 // "White" | "Black"
+    drill_chess: Chess,                 // current drill position (kept)
+    drill_edge_ids: Vec<i64>,           // my-move edges already graded this session
+    drill_expected: Vec<db_manager::RepertoireMoveRecord>, // my-move edges at current node
+    drill_start_edge: Option<db_manager::RepertoireMoveRecord>,
     // Current board FEN for explorer
     current_fen: Option<String>,
     // Repertoire builder state
@@ -971,14 +970,23 @@ fn main() {
     db.bootstrap().expect("failed to bootstrap database tables");
     db.run_migrations().expect("failed to run database migrations");
 
+    let migrated = tree::migrate_legacy_lines(&mut db).unwrap_or_else(|e| {
+        eprintln!("legacy line migration failed (continuing on tree): {e}");
+        0
+    });
+    if migrated > 0 {
+        println!("Migrated {migrated} legacy opening lines into the repertoire tree.");
+    }
+
     // Load initial data
     let state = Arc::new(Mutex::new(AppState {
         db,
         stockfish_path,
-        drill_line: None,
-        drill_moves_left: Vec::new(),
+        drill_side: "White".to_string(),
         drill_chess: Chess::default(),
-        drill_valid_first_moves: Vec::new(),
+        drill_edge_ids: Vec::new(),
+        drill_expected: Vec::new(),
+        drill_start_edge: None,
         current_fen: None,
         builder_chess: Chess::default(),
         builder_staged_uci: Vec::new(),
@@ -998,10 +1006,9 @@ fn main() {
             let app = app_weak.upgrade().unwrap();
 
             // Refresh dashboard
-            let today = local_now_str();
-            let due_lines = state.db.get_due_opening_lines("default_user", &today).unwrap_or_default();
+            let today = tree::local_now_str();
             let snapshot = mastery_ui::UserSnapshot {
-                opening_due: due_lines.len() as u32,
+                opening_due: state.db.get_due_repertoire_move_count(&today).unwrap_or(0),
                 blunder_hotspots: state.db.get_blunder_hotspots_count().unwrap_or(0),
                 puzzle_rating: state.db.get_puzzle_rating("default_user").unwrap_or(1500),
                 has_unreviewed_games: state.db.get_unreviewed_games_count().unwrap_or(0) > 0,
@@ -1048,14 +1055,14 @@ fn main() {
             }).collect();
             app.set_games(slint::ModelRc::from(Rc::new(slint::VecModel::from(game_entries))));
 
-            // Refresh opening lines
-            let lines = state.db.get_opening_lines("default_user").unwrap_or_default();
-            let line_entries: Vec<OpeningLineEntry> = lines.into_iter().map(|l| OpeningLineEntry {
-                id: slint::SharedString::from(l.id),
-                name: slint::SharedString::from(l.opening_name),
-                moves: slint::SharedString::from(db_manager::serialize_line_uci(&l.line_uci)),
-                confidence: l.confidence,
-                start_fen: slint::SharedString::from(l.start_fen),
+            // Refresh due repertoire moves (drill queue)
+            let due = state.db.get_due_repertoire_moves(&today).unwrap_or_default();
+            let line_entries: Vec<OpeningLineEntry> = due.iter().map(|e| OpeningLineEntry {
+                id: slint::SharedString::from(e.id.to_string()),
+                name: slint::SharedString::from(format!("{} ({})", e.san, e.source)),
+                moves: slint::SharedString::from(e.uci.clone()),
+                confidence: (e.srs_reps as f32 / 10.0).min(1.0),
+                start_fen: slint::SharedString::from(e.parent_fen.clone()),
             }).collect();
             app.set_opening_lines(slint::ModelRc::from(Rc::new(slint::VecModel::from(line_entries))));
 
@@ -1153,21 +1160,18 @@ fn main() {
     {
         let state = state.clone();
         let app_weak = app_weak.clone();
-        app.on_select_repertoire_line(move |line_id: slint::SharedString| {
+        app.on_select_repertoire_line(move |edge_id: slint::SharedString| {
             let mut state = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
-
-            let lines = state.db.get_opening_lines("default_user").unwrap_or_default();
-            if let Some(line) = lines.into_iter().find(|l| line_id == l.id) {
-                app.set_drill_line_id(line_id);
-                app.set_drill_name(slint::SharedString::from(line.opening_name.clone()));
-                app.set_drill_instructions(slint::SharedString::from("Press 'Start Drill' to practice this line."));
+            let id: i64 = match edge_id.parse() { Ok(v) => v, Err(_) => return };
+            if let Ok(Some(edge)) = state.db.get_repertoire_move(id) {
+                app.set_drill_line_id(edge_id);
+                app.set_drill_name(slint::SharedString::from(format!("Drill: {} ({})", edge.san, edge.source)));
+                app.set_drill_instructions(slint::SharedString::from("Press 'Start Drill' to practice from this position."));
                 app.set_drill_active(false);
-                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(fen_to_pieces(&line.start_fen)))));
+                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(fen_to_pieces(&edge.parent_fen)))));
                 app.set_board_selected_square(-1);
-
-                state.drill_line = Some(line);
-                state.drill_moves_left = Vec::new();
+                state.drill_start_edge = Some(edge);
             }
         });
     }
@@ -1179,61 +1183,15 @@ fn main() {
         app.on_start_drill(move || {
             let mut state = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
-
-            if let Some(line) = state.drill_line.clone() {
-                let fen = line.start_fen.clone();
-                let parsed_fen: shakmaty::fen::Fen = fen.parse().unwrap();
-                state.drill_chess = parsed_fen.into_position(CastlingMode::Standard).unwrap();
-
-                // Load all sibling lines from the same start position for branch quizzing
-                let siblings = state.db
-                    .get_lines_from_position(&fen, "default_user")
-                    .unwrap_or_default();
-                let branch_count = siblings.len().max(1);
-                // Collect every distinct first move across all branches
-                state.drill_valid_first_moves = siblings.iter()
-                    .filter_map(|l| l.line_uci.first().cloned())
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
-
-                app.set_drill_active(true);
-                app.set_drill_branch_info(slint::SharedString::from(
-                    format!("{} branch(es) at this position", branch_count),
-                ));
-
-                // Color-aware: if this is a Black line, auto-play White's first move
-                if line.side == "Black" && !line.line_uci.is_empty() {
-                    use shakmaty::{Position};
-                    use shakmaty::uci::Uci;
-                    let white_move = &line.line_uci[0];
-                    if let Ok(uci_move) = white_move.parse::<Uci>() {
-                        if let Ok(m) = uci_move.to_move(&state.drill_chess) {
-                            state.drill_chess.play_unchecked(&m);
-                            state.drill_moves_left = line.line_uci[1..].to_vec();
-                            // Recalculate valid first moves after white's move
-                            state.drill_valid_first_moves = state.drill_moves_left
-                                .first().cloned().into_iter().collect();
-                            let new_fen = shakmaty::fen::Fen::from_position(
-                                state.drill_chess.clone(), shakmaty::EnPassantMode::Always,
-                            ).to_string();
-                            app.set_board_pieces(slint::ModelRc::from(Rc::new(
-                                slint::VecModel::from(fen_to_pieces(&new_fen))
-                            )));
-                            app.set_drill_instructions(slint::SharedString::from(
-                                "White played. Now respond as Black!",
-                            ));
-                            return;
-                        }
-                    }
-                }
-
-                state.drill_moves_left = line.line_uci.clone();
-                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(fen_to_pieces(&fen)))));
-                app.set_drill_instructions(slint::SharedString::from(
-                    "Make your first move!",
-                ));
-            }
+            let Some(edge) = state.drill_start_edge.clone() else { return };
+            let Ok(Some((side, fen))) = state.db.get_node_side_and_fen(edge.parent_id) else { return };
+            let parsed: shakmaty::fen::Fen = match fen.parse() { Ok(f) => f, Err(_) => return };
+            let Ok(pos) = parsed.into_position(CastlingMode::Standard) else { return };
+            state.drill_side = side.clone();
+            state.drill_chess = pos;
+            state.drill_edge_ids.clear();
+            drill_advance(&mut state, &app); // shared session-step helper, below
+            app.set_drill_active(true);
         });
     }
 
@@ -1245,186 +1203,62 @@ fn main() {
         app.on_click_board_square(move |idx: i32| {
             let mut state = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
-
-            if !app.get_drill_active() {
-                return;
-            }
-
+            if !app.get_drill_active() { return; }
             let sel = app.get_board_selected_square();
-            if sel == -1 {
-                // First click: select a piece
-                app.set_board_selected_square(idx);
-            } else {
-                // Second click: play move
-                app.set_board_selected_square(-1);
-                let from_sq = index_to_square(sel as usize);
-                let to_sq = index_to_square(idx as usize);
-                let uci_try = format!("{}{}", from_sq, to_sq);
+            if sel == -1 { app.set_board_selected_square(idx); return; }
+            app.set_board_selected_square(-1);
+            let uci_try = format!("{}{}", index_to_square(sel as usize), index_to_square(idx as usize));
 
-                if state.drill_moves_left.is_empty() {
-                    return;
-                }
+            let today_days = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() / 86400;
 
-                let next_correct_move = state.drill_moves_left[0].clone();
-                // At the first move, accept any branch from the repertoire
-                let is_correct = if !state.drill_valid_first_moves.is_empty()
-                    && state.drill_moves_left.len() == state.drill_line.as_ref().map(|l| l.line_uci.len()).unwrap_or(0)
-                {
-                    state.drill_valid_first_moves.iter().any(|m| {
-                        *m == uci_try || *m == format!("{}q", uci_try)
-                    })
-                } else {
-                    uci_try == next_correct_move || format!("{}q", uci_try) == next_correct_move
+            let matched = state.drill_expected.iter()
+                .find(|e| e.uci == uci_try || e.uci == format!("{}q", uci_try))
+                .cloned();
+
+            if let Some(edge) = matched {
+                let _ = tree::grade_edge(&mut state.db, &edge, 5, today_days);
+                state.drill_edge_ids.push(edge.id);
+                let event = TrainingEventRecord {
+                    id: format!("evt_{}", uuid_now()),
+                    user_id: "default_user".to_string(),
+                    kind: "repertoire_drill".to_string(),
+                    target_id: format!("{} {}", edge.san, edge.uci),
+                    outcome: "Correct".to_string(),
+                    score_delta: 15.0,
+                    created_at: tree::local_now_str(),
                 };
-
-                if is_correct {
-                    // Correct! Play the move
-                    let san: San = next_correct_move.parse().unwrap_or_else(|_| {
-                        // fallback to parse uci as move directly via Uci
-                        let uci: Uci = next_correct_move.parse().unwrap();
-                        let m = uci.to_move(&state.drill_chess).unwrap();
+                let _ = state.db.insert_training_event(&event);
+                if let Ok(uci) = edge.uci.parse::<Uci>() {
+                    if let Ok(m) = uci.to_move(&state.drill_chess) {
                         state.drill_chess.play_unchecked(&m);
-                        "".parse().unwrap()
-                    });
-                    
-                    if san != "".parse().unwrap() {
-                        let m = san.to_move(&state.drill_chess).unwrap();
-                        state.drill_chess.play_unchecked(&m);
+                        let fen = shakmaty::fen::Fen::from_position(
+                            state.drill_chess.clone(), shakmaty::EnPassantMode::Legal).to_string();
+                        app.set_board_pieces(slint::ModelRc::from(Rc::new(
+                            slint::VecModel::from(fen_to_pieces(&fen)))));
                     }
-
-                    state.drill_moves_left.remove(0);
-
-                    // Update FEN rendering
-                    let new_fen = shakmaty::fen::Fen::from_position(state.drill_chess.clone(), shakmaty::EnPassantMode::Always).to_string();
-                    app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(fen_to_pieces(&new_fen)))));
-
-                    if state.drill_moves_left.is_empty() {
-                        // Drill completed!
-                        app.set_drill_active(false);
-                        app.set_drill_instructions(slint::SharedString::from("Drill completed successfully! Confidence increased."));
-
-                        if let Some(line) = state.drill_line.clone() {
-                            let card = srs::SrsCard {
-                                interval: line.srs_interval,
-                                ease_factor: line.srs_ease,
-                                repetitions: line.srs_reps,
-                            };
-                            let next = srs::review(&card, 5);
-                            let today_days = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() / 86400;
-                            let (dy, dm, dd) = days_to_ymd(today_days + next.interval as u64);
-                            let mut updated = line.clone();
-                            updated.srs_interval = next.interval;
-                            updated.srs_ease = next.ease_factor;
-                            updated.srs_reps = next.repetitions;
-                            updated.srs_due_date = format!("{:04}-{:02}-{:02}", dy, dm, dd);
-                            updated.confidence = (next.repetitions as f32 / 10.0).min(1.0);
-                            let _ = state.db.insert_opening_line(&updated);
-
-                            let event = TrainingEventRecord {
-                                id: format!("evt_{}", uuid_now()),
-                                user_id: "default_user".to_string(),
-                                kind: "repertoire_drill".to_string(),
-                                target_id: line.opening_name.clone(),
-                                outcome: "Correct".to_string(),
-                                score_delta: 15.0,
-                                created_at: local_now_str(),
-                            };
-                            let _ = state.db.insert_training_event(&event);
-                        }
-                        drop(state);
-                        refresh_data_cp();
-                    } else {
-                        // Play opponent's response automatically!
-                        let opp_move = state.drill_moves_left.remove(0);
-                        
-                        let uci: Uci = opp_move.parse().unwrap();
-                        let m = uci.to_move(&state.drill_chess).unwrap();
-                        state.drill_chess.play_unchecked(&m);
-
-                        let opp_fen = shakmaty::fen::Fen::from_position(state.drill_chess.clone(), shakmaty::EnPassantMode::Always).to_string();
-                        app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(fen_to_pieces(&opp_fen)))));
-
-                        if state.drill_moves_left.is_empty() {
-                            // Completed on opponent move
-                            app.set_drill_active(false);
-                            app.set_drill_instructions(slint::SharedString::from("Drill completed successfully!"));
-                            if let Some(line) = state.drill_line.clone() {
-                                let card = srs::SrsCard {
-                                    interval: line.srs_interval,
-                                    ease_factor: line.srs_ease,
-                                    repetitions: line.srs_reps,
-                                };
-                                let next = srs::review(&card, 5);
-                                let today_days = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() / 86400;
-                                let (dy, dm, dd) = days_to_ymd(today_days + next.interval as u64);
-                                let mut updated = line.clone();
-                                updated.srs_interval = next.interval;
-                                updated.srs_ease = next.ease_factor;
-                                updated.srs_reps = next.repetitions;
-                                updated.srs_due_date = format!("{:04}-{:02}-{:02}", dy, dm, dd);
-                                updated.confidence = (next.repetitions as f32 / 10.0).min(1.0);
-                                let _ = state.db.insert_opening_line(&updated);
-
-                                let event = TrainingEventRecord {
-                                    id: format!("evt_{}", uuid_now()),
-                                    user_id: "default_user".to_string(),
-                                    kind: "repertoire_drill".to_string(),
-                                    target_id: line.opening_name.clone(),
-                                    outcome: "Correct".to_string(),
-                                    score_delta: 15.0,
-                                    created_at: local_now_str(),
-                                };
-                                let _ = state.db.insert_training_event(&event);
-                            }
-                            drop(state);
-                            refresh_data_cp();
-                        } else {
-                            app.set_drill_instructions(slint::SharedString::from("Opponent responded. Make your next move!"));
-                        }
-                    }
-                } else {
-                    app.set_drill_instructions(slint::SharedString::from("Incorrect move! Try again."));
-
-                    if let Some(line) = state.drill_line.clone() {
-                        let card = srs::SrsCard {
-                            interval: line.srs_interval,
-                            ease_factor: line.srs_ease,
-                            repetitions: line.srs_reps,
-                        };
-                        let next = srs::review(&card, 1);
-                        let today_days = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() / 86400;
-                        let (dy, dm, dd) = days_to_ymd(today_days + next.interval as u64);
-                        let mut updated = line.clone();
-                        updated.srs_interval = next.interval;
-                        updated.srs_ease = next.ease_factor;
-                        updated.srs_reps = next.repetitions;
-                        updated.srs_due_date = format!("{:04}-{:02}-{:02}", dy, dm, dd);
-                        updated.confidence = (next.repetitions as f32 / 10.0).min(1.0);
-                        let _ = state.db.insert_opening_line(&updated);
-
-                        let event = TrainingEventRecord {
-                            id: format!("evt_{}", uuid_now()),
-                            user_id: "default_user".to_string(),
-                            kind: "repertoire_drill".to_string(),
-                            target_id: line.opening_name.clone(),
-                            outcome: "Failed".to_string(),
-                            score_delta: -5.0,
-                            created_at: local_now_str(),
-                        };
-                        let _ = state.db.insert_training_event(&event);
-                    }
-                    drop(state);
-                    refresh_data_cp();
                 }
+                drill_advance(&mut state, &app);
+                if !app.get_drill_active() { drop(state); refresh_data_cp(); }
+            } else {
+                // Wrong move: fail every expected edge at this node (they were all "the answer")
+                for edge in state.drill_expected.clone() {
+                    let _ = tree::grade_edge(&mut state.db, &edge, 1, today_days);
+                }
+                let event = TrainingEventRecord {
+                    id: format!("evt_{}", uuid_now()),
+                    user_id: "default_user".to_string(),
+                    kind: "repertoire_drill".to_string(),
+                    target_id: uci_try,
+                    outcome: "Failed".to_string(),
+                    score_delta: -5.0,
+                    created_at: tree::local_now_str(),
+                };
+                let _ = state.db.insert_training_event(&event);
+                app.set_drill_instructions(slint::SharedString::from(
+                    "Not in your repertoire here — try again (this move is now due for review)."));
+                drop(state);
+                refresh_data_cp();
             }
         });
     }
@@ -1573,23 +1407,11 @@ fn main() {
                         // Re-evaluate to get best line
                         if let Ok(analysis) = sf.analyze_fen(&pos_record.fen, AnalysisConfig { depth: 10, multipv: 1 }) {
                             if !analysis.variations.is_empty() {
-                                let uci_line = analysis.variations[0].pv.clone();
-                                let line_record = OpeningLineRecord {
-                                    id: format!("line_{}", game_id_thread),
-                                    user_id: "default_user".to_string(),
-                                    opening_name: format!("Mistake Correction ({} vs {})", white, black),
-                                    start_fen: pos_record.fen.clone(),
-                                    line_uci: uci_line,
-                                    source: "game_review".to_string(),
-                                    confidence: 0.0,
-                                    srs_interval: 1.0,
-                                    srs_ease: 2.5,
-                                    srs_reps: 0,
-                                    srs_due_date: String::new(),
-                                    side: "White".to_string(),
-                                };
+                                let uci_line: Vec<String> = analysis.variations[0].pv.iter().take(6).cloned().collect();
+                                let mover_is_white = pos_record.fen.split_whitespace().nth(1) == Some("w");
+                                let side = if mover_is_white { "White" } else { "Black" };
                                 let mut state = state_thread.lock().unwrap();
-                                let _ = state.db.insert_opening_line(&line_record);
+                                let _ = tree::import_uci_line(&mut state.db, &pos_record.fen, &uci_line, side, "mistake");
 
                                 // Add a notification log
                                 let event = TrainingEventRecord {
@@ -1599,7 +1421,7 @@ fn main() {
                                     target_id: game_id_thread.clone(),
                                     outcome: format!("{:?}", critical.class),
                                     score_delta: 0.0,
-                                    created_at: local_now_str(),
+                                    created_at: tree::local_now_str(),
                                 };
                                 let _ = state.db.insert_training_event(&event);
                             }
@@ -1647,7 +1469,7 @@ fn main() {
                         let mut st = state.lock().unwrap();
                         for g in &games {
                             if !st.db.is_game_synced(&g.id) {
-                                let _ = st.db.mark_game_synced(&g.id, &local_now_str());
+                                let _ = st.db.mark_game_synced(&g.id, &tree::local_now_str());
                             }
                         }
                         drop(st);
@@ -1889,27 +1711,15 @@ fn main() {
             let mut st = state.lock().unwrap();
             if st.builder_staged_uci.is_empty() { return; }
             let app = app_weak.upgrade().unwrap();
-            let name = app.get_builder_line_name().to_string();
-            let name = if name.trim().is_empty() {
-                format!("{} Line {}", st.builder_color, uuid_now())
-            } else {
-                name
-            };
-            let line = OpeningLineRecord {
-                id: format!("builder_{}", uuid_now()),
-                user_id: "default_user".to_string(),
-                opening_name: name,
-                start_fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string(),
-                line_uci: st.builder_staged_uci.clone(),
-                source: "builder".to_string(),
-                confidence: 0.0,
-                srs_interval: 1.0,
-                srs_ease: 2.5,
-                srs_reps: 0,
-                srs_due_date: String::new(),
-                side: st.builder_color.clone(),
-            };
-            let _ = st.db.insert_opening_line(&line);
+            let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+            let staged = st.builder_staged_uci.clone();
+            let side = st.builder_color.clone();
+            match tree::import_uci_line(&mut st.db, start_fen, &staged, &side, "manual") {
+                Ok(n) => app.set_drill_instructions(slint::SharedString::from(
+                    format!("Saved: {n} new move(s) added to your {side} repertoire."))),
+                Err(e) => app.set_drill_instructions(slint::SharedString::from(
+                    format!("Save failed: {e}"))),
+            }
             // Reset builder after save
             st.builder_chess = shakmaty::Chess::default();
             st.builder_staged_uci.clear();
@@ -1917,7 +1727,6 @@ fn main() {
             drop(st);
             app.set_builder_moves(slint::SharedString::from(""));
             app.set_builder_line_name(slint::SharedString::from(""));
-            app.set_drill_instructions(slint::SharedString::from("Line saved!"));
             let pieces = fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
             app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(pieces))));
             refresh_data_save();
@@ -2000,35 +1809,51 @@ fn uuid_now() -> String {
     format!("{:x}", since_the_epoch)
 }
 
-fn local_now_str() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = secs / 86400;
-    let (y, m, d) = days_to_ymd(days);
-    format!("{:04}-{:02}-{:02}", y, m, d)
-}
-
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970u64;
+/// Advance the drill: auto-play opponent edges, load expected my-moves, detect session end.
+fn drill_advance(state: &mut AppState, app: &AppWindow) {
     loop {
-        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-        let days_in_year = if leap { 366 } else { 365 };
-        if days < days_in_year { break; }
-        days -= days_in_year;
-        year += 1;
+        let key = tree::position_key(&state.drill_chess);
+        let edges = state.db.get_repertoire_moves_from(&key, &state.drill_side).unwrap_or_default();
+        let (mine, theirs): (Vec<_>, Vec<_>) = edges.into_iter().partition(|e| e.is_my_move);
+
+        let side_to_move_is_mine =
+            (state.drill_chess.turn() == shakmaty::Color::White) == (state.drill_side == "White");
+
+        if side_to_move_is_mine {
+            if mine.is_empty() {
+                app.set_drill_active(false);
+                app.set_drill_instructions(slint::SharedString::from("Line complete — well done!"));
+                return;
+            }
+            app.set_drill_branch_info(slint::SharedString::from(
+                format!("{} accepted move(s) here", mine.len())));
+            app.set_drill_instructions(slint::SharedString::from("Your move."));
+            state.drill_expected = mine;
+            return;
+        }
+        // Opponent's turn: auto-play a random opponent edge, or end if none.
+        if theirs.is_empty() {
+            app.set_drill_active(false);
+            app.set_drill_instructions(slint::SharedString::from("Line complete — well done!"));
+            return;
+        }
+        let pick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+            .subsec_nanos() as usize % theirs.len();
+        let mv = &theirs[pick];
+        if let Ok(uci) = mv.uci.parse::<shakmaty::uci::Uci>() {
+            if let Ok(m) = uci.to_move(&state.drill_chess) {
+                state.drill_chess.play_unchecked(&m);
+                let fen = shakmaty::fen::Fen::from_position(
+                    state.drill_chess.clone(), shakmaty::EnPassantMode::Legal).to_string();
+                app.set_board_pieces(slint::ModelRc::from(std::rc::Rc::new(
+                    slint::VecModel::from(fen_to_pieces(&fen)))));
+                continue;
+            }
+        }
+        app.set_drill_active(false);
+        return;
     }
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut month = 1u64;
-    for md in &month_days {
-        if days < *md { break; }
-        days -= *md;
-        month += 1;
-    }
-    (year, month, days + 1)
 }
 
 // Temporary alias to bridge name discrepancy in shakmaty FEN parsing
