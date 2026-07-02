@@ -117,6 +117,7 @@ slint::slint! {
         // Status / analysis properties
         in-out property <string> weakness-summary: "";
         in-out property <string> sync-status: "Not synced";
+        in-out property <string> chesscom-sync-status: "Not synced";
         in-out property <string> tree-status: "";
 
         // Repertoire builder state
@@ -154,6 +155,7 @@ slint::slint! {
         callback click-board-square(int);
         callback start-drill();
         callback sync-lichess(string);
+        callback sync-chesscom();
         callback build-opening-tree();
         callback load-puzzle();
         callback explorer-select-move(string);
@@ -336,6 +338,15 @@ slint::slint! {
                                 Text { text: root.stat-rating; color: #fbbf24; font-size: 24px; font-weight: 700; }
                             }
                         }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        height: 40px;
+                        Button { text: "Sync Lichess Games"; clicked => { root.sync-lichess(""); } }
+                        Text { text: root.sync-status; color: #a1a1aa; font-size: 12px; vertical-alignment: center; }
+                        Button { text: "Sync Chess.com Games"; clicked => { root.sync-chesscom(); } }
+                        Text { text: root.chesscom-sync-status; color: #a1a1aa; font-size: 12px; vertical-alignment: center; }
                     }
 
                     // Activity History
@@ -995,6 +1006,43 @@ fn find_stockfish_path() -> String {
     "mock-stockfish".to_string()
 }
 
+/// Insert a game + its per-ply positions (unanalyzed). Existing rows are untouched.
+fn ingest_pgn_game(
+    db: &mut SqliteStore,
+    game_id: &str,
+    source: &str,
+    pgn: &str,
+    fallback_date: Option<String>,
+) -> Result<(), String> {
+    let parsed = pgn_processor::parse_pgn(pgn);
+    let game = GameRecord {
+        id: game_id.to_string(),
+        source: source.to_string(),
+        white: parsed.headers.get("White").cloned().unwrap_or_else(|| "White".into()),
+        black: parsed.headers.get("Black").cloned().unwrap_or_else(|| "Black".into()),
+        result: parsed.result.clone(),
+        eco: parsed.headers.get("ECO").cloned(),
+        pgn: pgn.to_string(),
+        played_at: parsed.headers.get("Date").cloned()
+            .map(|d| d.replace('.', "-"))
+            .or(fallback_date),
+    };
+    db.insert_game(&game)?;
+    let fens_and_moves = pgn_processor::game_to_fen_and_uci(&parsed.moves)?;
+    for (ply, (fen, uci_move)) in fens_and_moves.into_iter().enumerate() {
+        db.insert_position(&PositionRecord {
+            id: format!("{}_{}", game_id, ply + 1),
+            game_id: game_id.to_string(),
+            ply: (ply + 1) as u32,
+            fen,
+            played_move: uci_move,
+            centipawn_loss: None,
+            mistake_class: None,
+        })?;
+    }
+    Ok(())
+}
+
 struct AppState {
     db: SqliteStore,
     stockfish_path: String,
@@ -1330,37 +1378,9 @@ fn main() {
             let white = parsed.headers.get("White").cloned().unwrap_or_else(|| "WhitePlayer".to_string());
             let black = parsed.headers.get("Black").cloned().unwrap_or_else(|| "BlackPlayer".to_string());
             let date = parsed.headers.get("Date").cloned().unwrap_or_else(|| "2026-06-12".to_string());
-            let result_str = parsed.headers.get("Result").cloned().unwrap_or_else(|| "*".to_string());
             let game_id = format!("{}_{}_{}", white, black, date).replace(" ", "_");
 
-            let game = GameRecord {
-                id: game_id.clone(),
-                source: "Imported PGN".to_string(),
-                white: white.clone(),
-                black: black.clone(),
-                result: Some(result_str),
-                eco: parsed.headers.get("ECO").cloned(),
-                pgn: pgn_text.to_string(),
-                played_at: Some(date),
-            };
-
-            let _ = state_lock.db.insert_game(&game);
-
-            // Map moves to FENs and insert
-            if let Ok(fens_and_moves) = pgn_processor::game_to_fen_and_uci(&parsed.moves) {
-                for (ply, (fen, uci_move)) in fens_and_moves.into_iter().enumerate() {
-                    let pos = PositionRecord {
-                        id: format!("{}_{}", game_id, ply + 1),
-                        game_id: game_id.clone(),
-                        ply: (ply + 1) as u32,
-                        fen,
-                        played_move: uci_move,
-                        centipawn_loss: None,
-                        mistake_class: None,
-                    };
-                    let _ = state_lock.db.insert_position(&pos);
-                }
-            }
+            let _ = ingest_pgn_game(&mut state_lock.db, &game_id, "Imported PGN", &pgn_text, Some(date));
 
             // Trigger background thread to analyze and evaluate this game!
             let sf_path = state_lock.stockfish_path.clone();
@@ -1500,6 +1520,11 @@ fn main() {
         let refresh_data_cp = refresh_data.clone();
         app.on_sync_lichess(move |username: slint::SharedString| {
             let username = username.to_string();
+            let username = if username.is_empty() {
+                std::env::var("LICHESS_USERNAME").unwrap_or_else(|_| "hackandtoss".into())
+            } else {
+                username
+            };
             let state = state.clone();
             let app_weak = app_weak.clone();
             let refresh_data_cp = refresh_data_cp.clone();
@@ -1517,17 +1542,26 @@ fn main() {
                 let games = rt.block_on(client.fetch_user_games(&username, 50));
                 let msg = match games {
                     Ok(games) => {
-                        let count = games.len();
                         let mut st = state.lock().unwrap();
+                        let mut new_count = 0u32;
+                        let mut skipped = 0u32;
                         for g in &games {
-                            if !st.db.is_game_synced(&g.id) {
-                                let _ = st.db.mark_game_synced(&g.id, &tree::local_now_str());
+                            if st.db.is_synced("lichess", &g.id) { continue; }
+                            let Some(pgn) = g.pgn.clone() else { skipped += 1; continue; };
+                            let date = g.created_at.map(|ms| {
+                                let (y, m, d) = tree::days_to_ymd(ms / 86_400_000);
+                                format!("{:04}-{:02}-{:02}", y, m, d)
+                            });
+                            match ingest_pgn_game(&mut st.db, &format!("lichess_{}", g.id), "lichess", &pgn, date) {
+                                Ok(()) => new_count += 1,
+                                Err(_) => skipped += 1,
                             }
+                            let _ = st.db.mark_synced("lichess", &g.id, &tree::local_now_str());
                         }
                         drop(st);
                         // refresh_data is Rc (non-Send), invoke on event loop thread
                         let _ = slint::invoke_from_event_loop(move || { refresh_data_cp(); });
-                        format!("Synced {} games", count)
+                        format!("Lichess: {new_count} new game(s), {skipped} skipped")
                     }
                     Err(e) => format!("Sync failed: {}", e),
                 };
@@ -1537,6 +1571,69 @@ fn main() {
                         app.set_sync_status(slint::SharedString::from(msg));
                     }
                 });
+            });
+        });
+    }
+
+    // Chess.com sync
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh_data_cp = refresh_data.clone();
+        app.on_sync_chesscom(move || {
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            let refresh_data_cp = refresh_data_cp.clone();
+            std::thread::spawn(move || {
+                let set_status = |aw: slint::Weak<AppWindow>, msg: String| {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(app) = aw.upgrade() {
+                            app.set_chesscom_sync_status(slint::SharedString::from(msg));
+                        }
+                    });
+                };
+                set_status(app_weak.clone(), "Syncing…".into());
+                let username = std::env::var("CHESSCOM_USERNAME")
+                    .unwrap_or_else(|_| "ElectricMindGames".into());
+                let ua = std::env::var("CHESSCOM_USER_AGENT").unwrap_or_else(|_| {
+                    "grandmaster-forge (contact: johncjohnson1113@gmail.com)".into()
+                });
+                let client = chesscom_client::ChesscomClient::new(&ua);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let msg = (|| -> Result<String, String> {
+                    let archives = rt.block_on(client.fetch_archives(&username))?;
+                    let mut new_count = 0u32;
+                    let mut skipped = 0u32;
+                    // Newest months first; stop after 50 new games to bound first syncs.
+                    'outer: for url in archives.iter().rev() {
+                        let games = rt.block_on(client.fetch_month(url))?;
+                        for g in games.iter().rev() {
+                            let ext_id = chesscom_client::game_external_id(g);
+                            let mut st = state.lock().unwrap();
+                            if st.db.is_synced("chesscom", &ext_id) { continue; }
+                            let Some(pgn) = g.pgn.clone() else {
+                                let _ = st.db.mark_synced("chesscom", &ext_id, &tree::local_now_str());
+                                skipped += 1;
+                                continue;
+                            };
+                            let date = g.end_time.map(|secs| {
+                                let (y, m, d) = tree::days_to_ymd(secs / 86_400);
+                                format!("{:04}-{:02}-{:02}", y, m, d)
+                            });
+                            match ingest_pgn_game(&mut st.db, &format!("chesscom_{ext_id}"), "chesscom", &pgn, date) {
+                                Ok(()) => new_count += 1,
+                                Err(_) => skipped += 1,
+                            }
+                            let _ = st.db.mark_synced("chesscom", &ext_id, &tree::local_now_str());
+                            if new_count >= 50 { break 'outer; }
+                        }
+                    }
+                    Ok(format!("Chess.com: {new_count} new game(s), {skipped} skipped"))
+                })().unwrap_or_else(|e| format!("Chess.com sync failed: {e}"));
+                let _ = slint::invoke_from_event_loop(move || {
+                    refresh_data_cp();
+                });
+                set_status(app_weak, msg);
             });
         });
     }
