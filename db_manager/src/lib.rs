@@ -1094,7 +1094,15 @@ mod tests {
     fn lichess_sync_migrates_to_game_sync() {
         let mut store = SqliteStore::new_in_memory().unwrap();
         store.bootstrap().unwrap();
-        store.mark_game_synced("oldgame", "2026-06-01").unwrap();
+        // Simulate a database created by an older binary with lichess_sync table
+        store.conn.execute(
+            "CREATE TABLE lichess_sync (game_id TEXT PRIMARY KEY, synced_at TEXT NOT NULL)",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO lichess_sync (game_id, synced_at) VALUES ('oldgame', '2026-06-01')",
+            [],
+        ).unwrap();
         store.run_migrations().unwrap();
         assert!(store.is_synced("lichess", "oldgame"));
         // lichess_sync table is gone
