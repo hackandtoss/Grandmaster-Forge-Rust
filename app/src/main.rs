@@ -1401,7 +1401,6 @@ fn main() {
             let state_thread = state.clone();
             let refresh_thread = refresh_data_cp.clone();
             let game_id_thread = game_id.clone();
-            let parsed_moves = parsed.moves.clone();
 
             thread::spawn(move || {
                 let mut sf = match StockfishEngine::new(&sf_path) {
@@ -1486,30 +1485,66 @@ fn main() {
                     );
                 }
 
-                // Identify first critical mistake
-                if let Some(critical) = pgn_processor::first_critical_mistake(&parsed_moves, &losses) {
-                    // Look up FEN of the blunder position
-                    if let Some(pos_record) = positions.get((critical.ply as usize).saturating_sub(1)) {
-                        // Re-evaluate to get best line
-                        if let Ok(analysis) = sf.analyze_fen(&pos_record.fen, AnalysisConfig { depth: 10, multipv: 1 }) {
-                            if !analysis.variations.is_empty() {
-                                let uci_line: Vec<String> = analysis.variations[0].pv.iter().take(6).cloned().collect();
-                                let mover_is_white = pos_record.fen.split_whitespace().nth(1) == Some("w");
-                                let side = if mover_is_white { "White" } else { "Black" };
-                                let mut state = state_thread.lock().unwrap();
-                                let _ = tree::import_uci_line(&mut state.db, &pos_record.fen, &uci_line, side, "mistake");
-
-                                // Add a notification log
+                // Mistake tree: worst USER eval drop -> best move, top-3 replies, follow-ups.
+                let user_side = tree::user_side_for_game(&white, &black);
+                let worst = positions
+                    .iter()
+                    .zip(losses.iter())
+                    .filter(|(pos, _)| match &user_side {
+                        // ply 1,3,5.. = White's moves (odd plies)
+                        Some(s) => (pos.ply % 2 == 1) == (s == "White"),
+                        None => true,
+                    })
+                    .max_by_key(|(_, loss)| **loss);
+                if let Some((pos_record, &loss)) = worst {
+                    if loss >= 60 {
+                        let mover_is_white = pos_record.fen.split_whitespace().nth(1) == Some("w");
+                        let side = if mover_is_white { "White" } else { "Black" }.to_string();
+                        // 1) correction (my move)
+                        if let Ok(root_analysis) =
+                            sf.analyze_fen(&pos_record.fen, AnalysisConfig { depth: 12, multipv: 1 })
+                        {
+                            let best = root_analysis.bestmove.clone();
+                            let mut st = state_thread.lock().unwrap();
+                            if let Ok((_, after_best, _)) =
+                                tree::add_move_edge(&mut st.db, &pos_record.fen, &best, &side, "mistake")
+                            {
+                                drop(st);
+                                // 2) top-3 opponent replies
+                                if let Ok(reply_analysis) =
+                                    sf.analyze_fen(&after_best, AnalysisConfig { depth: 10, multipv: 3 })
+                                {
+                                    let mut seen = std::collections::HashSet::new();
+                                    for var in reply_analysis.variations.iter().take(3) {
+                                        let Some(reply) = var.pv.first() else { continue };
+                                        if !seen.insert(reply.clone()) { continue; }
+                                        let mut st = state_thread.lock().unwrap();
+                                        let Ok((_, after_reply, _)) = tree::add_move_edge(
+                                            &mut st.db, &after_best, reply, &side, "mistake",
+                                        ) else { continue };
+                                        drop(st);
+                                        // 3) my best follow-up to each reply
+                                        if let Ok(fu) = sf.analyze_fen(
+                                            &after_reply, AnalysisConfig { depth: 10, multipv: 1 },
+                                        ) {
+                                            let mut st = state_thread.lock().unwrap();
+                                            let _ = tree::add_move_edge(
+                                                &mut st.db, &after_reply, &fu.bestmove, &side, "mistake",
+                                            );
+                                        }
+                                    }
+                                }
+                                let mut st = state_thread.lock().unwrap();
                                 let event = TrainingEventRecord {
                                     id: format!("evt_{}", uuid_now()),
                                     user_id: "default_user".to_string(),
-                                    kind: "game_review".to_string(),
+                                    kind: "mistake_tree".to_string(),
                                     target_id: game_id_thread.clone(),
-                                    outcome: format!("{:?}", critical.class),
+                                    outcome: format!("worst drop {loss}cp at ply {}", pos_record.ply),
                                     score_delta: 0.0,
                                     created_at: tree::local_now_str(),
                                 };
-                                let _ = state.db.insert_training_event(&event);
+                                let _ = st.db.insert_training_event(&event);
                             }
                         }
                     }

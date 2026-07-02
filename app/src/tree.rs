@@ -17,6 +17,22 @@ fn parse_position(fen: &str) -> Result<Chess, String> {
         .map_err(|e| format!("illegal position '{fen}': {e}"))
 }
 
+/// Which side did the user play? Matches configured usernames, case-insensitive.
+pub fn user_side_for_game(white: &str, black: &str) -> Option<String> {
+    let names: Vec<String> = ["LICHESS_USERNAME", "CHESSCOM_USERNAME"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|s| s.to_lowercase())
+        .collect();
+    if names.iter().any(|n| n == &white.to_lowercase()) {
+        return Some("White".into());
+    }
+    if names.iter().any(|n| n == &black.to_lowercase()) {
+        return Some("Black".into());
+    }
+    None
+}
+
 /// Insert one edge. Returns (edge_id, child_full_fen, was_new).
 pub fn add_move_edge(
     db: &mut SqliteStore,
@@ -274,6 +290,15 @@ mod tests {
         let after_e4 = db.get_repertoire_moves_from(&walked[0].child_fen, "White").unwrap();
         assert_eq!(after_e4.len(), 2); // e5 and c5, opponent moves
         assert!(after_e4.iter().all(|e| !e.is_my_move));
+    }
+
+    #[test]
+    fn user_side_matches_env_usernames() {
+        std::env::set_var("LICHESS_USERNAME", "hackandtoss");
+        std::env::set_var("CHESSCOM_USERNAME", "ElectricMindGames");
+        assert_eq!(user_side_for_game("HackAndToss", "opp"), Some("White".to_string()));
+        assert_eq!(user_side_for_game("opp", "electricmindgames"), Some("Black".to_string()));
+        assert_eq!(user_side_for_game("a", "b"), None);
     }
 
     #[test]
