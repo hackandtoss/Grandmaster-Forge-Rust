@@ -38,7 +38,9 @@ pub fn parse_pgn(text: &str) -> ParsedGame {
 }
 
 pub fn first_critical_mistake(moves: &[String], losses: &[i32]) -> Option<MistakeEvent> {
-    let idx = losses.iter().position(|loss| classify_centipawn_loss(*loss).is_some())?;
+    let idx = losses
+        .iter()
+        .position(|loss| classify_centipawn_loss(*loss).is_some())?;
     let class = classify_centipawn_loss(losses[idx])?;
     let played_move = moves.get(idx)?.clone();
 
@@ -48,6 +50,29 @@ pub fn first_critical_mistake(moves: &[String], losses: &[i32]) -> Option<Mistak
         centipawn_loss: losses[idx],
         class,
     })
+}
+
+pub fn game_to_fen_and_uci(moves: &[String]) -> Result<Vec<(String, String)>, String> {
+    use shakmaty::{san::San, uci::Uci, Chess, Position};
+    let mut pos = Chess::default();
+    let mut result = Vec::new();
+    for san_str in moves {
+        let fen_before =
+            shakmaty::fen::Fen::from_position(pos.clone(), shakmaty::EnPassantMode::Always)
+                .to_string();
+        let san: San = san_str
+            .parse()
+            .map_err(|e| format!("invalid SAN move '{san_str}': {e}"))?;
+        let m = san
+            .to_move(&pos)
+            .map_err(|e| format!("illegal move '{san_str}' in pos {fen_before}: {e}"))?;
+        let uci_move = Uci::from_move(&m, shakmaty::CastlingMode::Standard).to_string();
+        pos = pos
+            .play(&m)
+            .map_err(|e| format!("failed to play move '{san_str}' in pos {fen_before}: {e}"))?;
+        result.push((fen_before, uci_move));
+    }
+    Ok(result)
 }
 
 pub fn classify_centipawn_loss(loss: i32) -> Option<MistakeClass> {
@@ -132,6 +157,209 @@ fn parse_san_moves(text: &str) -> Vec<String> {
     moves
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkedMove {
+    pub parent_fen: String,
+    pub child_fen: String,
+    pub uci: String,
+    pub san: String,
+}
+
+/// Normalized FEN used as a repertoire-tree key (must match db_manager::normalize_fen).
+pub fn position_key(pos: &shakmaty::Chess) -> String {
+    use shakmaty::EnPassantMode;
+    let fen = shakmaty::fen::Fen::from_position(pos.clone(), EnPassantMode::Legal).to_string();
+    let fields: Vec<&str> = fen.split_whitespace().take(4).collect();
+    format!("{} 0 1", fields.join(" "))
+}
+
+/// Split a multi-game PGN on [Event headers.
+pub fn split_games(text: &str) -> Vec<String> {
+    let mut games: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("[Event ") && !current.trim().is_empty() {
+            games.push(std::mem::take(&mut current));
+        }
+        current.push_str(line);
+        current.push('\n');
+    }
+    if !current.trim().is_empty() {
+        games.push(current);
+    }
+    games
+}
+
+/// Walk every game and every nested variation; emit one WalkedMove per legal move.
+/// Illegal moves abort only the branch they occur in.
+pub fn walk_pgn_variations(text: &str) -> Result<Vec<WalkedMove>, String> {
+    use shakmaty::san::San;
+    use shakmaty::uci::Uci;
+    use shakmaty::{Chess, Position};
+
+    if text.trim().is_empty() {
+        return Err("empty PGN input".to_string());
+    }
+
+    let mut out = Vec::new();
+    for game_text in split_games(text) {
+        // Movetext = everything that is not a header line.
+        let movetext: String = game_text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('['))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut pos = Chess::default();
+        let mut prev: Option<Chess> = None;
+        // Each '(' pushes (position_to_return_to, prev_at_that_point).
+        let mut stack: Vec<(Chess, Option<Chess>)> = Vec::new();
+        let mut dead_branch_depth: Option<usize> = None; // skip tokens after illegal move until branch closes
+
+        let mut chars = movetext.chars().peekable();
+        let mut token = String::new();
+        let flush = |token: &mut String,
+                     pos: &mut Chess,
+                     prev: &mut Option<Chess>,
+                     dead: &mut Option<usize>,
+                     depth: usize,
+                     out: &mut Vec<WalkedMove>| {
+            if token.is_empty() {
+                return;
+            }
+            let raw = std::mem::take(token);
+            if dead.is_some() {
+                return;
+            }
+            let t = raw.trim_end_matches(['?', '!']);
+            if t.is_empty() || t.starts_with('$') || matches!(t, "1-0" | "0-1" | "1/2-1/2" | "*") {
+                return;
+            }
+            // Strip an unspaced move-number prefix ("1." / "12..." / bare "1") so
+            // tokens like "1.e4" or "12...Nf6" still yield their SAN move.
+            let after_digits = t.trim_start_matches(|c: char| c.is_ascii_digit());
+            let stripped = if after_digits.len() != t.len() {
+                after_digits.trim_start_matches('.')
+            } else {
+                t
+            };
+            if stripped.is_empty() || stripped.chars().all(|c| c.is_ascii_digit()) {
+                return;
+            }
+            match stripped.parse::<San>() {
+                Ok(san) => match san.to_move(pos) {
+                    Ok(m) => {
+                        let parent = position_key(pos);
+                        let uci = Uci::from_move(&m, shakmaty::CastlingMode::Standard).to_string();
+                        let san_str = San::from_move(pos, &m).to_string();
+                        let next = pos.clone().play(&m).expect("legal move plays");
+                        *prev = Some(pos.clone());
+                        *pos = next;
+                        out.push(WalkedMove {
+                            parent_fen: parent,
+                            child_fen: position_key(pos),
+                            uci,
+                            san: san_str,
+                        });
+                    }
+                    Err(_) => *dead = Some(depth),
+                },
+                Err(_) => *dead = Some(depth),
+            }
+        };
+
+        while let Some(ch) = chars.next() {
+            match ch {
+                '{' => {
+                    flush(
+                        &mut token,
+                        &mut pos,
+                        &mut prev,
+                        &mut dead_branch_depth,
+                        stack.len(),
+                        &mut out,
+                    );
+                    for c in chars.by_ref() {
+                        if c == '}' {
+                            break;
+                        }
+                    }
+                }
+                ';' => {
+                    flush(
+                        &mut token,
+                        &mut pos,
+                        &mut prev,
+                        &mut dead_branch_depth,
+                        stack.len(),
+                        &mut out,
+                    );
+                    for c in chars.by_ref() {
+                        if c == '\n' {
+                            break;
+                        }
+                    }
+                }
+                '(' => {
+                    flush(
+                        &mut token,
+                        &mut pos,
+                        &mut prev,
+                        &mut dead_branch_depth,
+                        stack.len(),
+                        &mut out,
+                    );
+                    stack.push((pos.clone(), prev.clone()));
+                    if dead_branch_depth.is_none() {
+                        if let Some(p) = prev.clone() {
+                            pos = p; // variation replaces the last played move
+                        }
+                    }
+                }
+                ')' => {
+                    flush(
+                        &mut token,
+                        &mut pos,
+                        &mut prev,
+                        &mut dead_branch_depth,
+                        stack.len(),
+                        &mut out,
+                    );
+                    if let Some((restored, restored_prev)) = stack.pop() {
+                        if let Some(d) = dead_branch_depth {
+                            if stack.len() < d {
+                                dead_branch_depth = None;
+                            }
+                        }
+                        pos = restored;
+                        prev = restored_prev;
+                    }
+                }
+                c if c.is_whitespace() => {
+                    flush(
+                        &mut token,
+                        &mut pos,
+                        &mut prev,
+                        &mut dead_branch_depth,
+                        stack.len(),
+                        &mut out,
+                    );
+                }
+                c => token.push(c),
+            }
+        }
+        flush(
+            &mut token,
+            &mut pos,
+            &mut prev,
+            &mut dead_branch_depth,
+            0,
+            &mut out,
+        );
+    }
+    Ok(out)
+}
+
 fn is_result_token(token: &str) -> bool {
     matches!(token, "1-0" | "0-1" | "1/2-1/2" | "*")
 }
@@ -167,5 +395,88 @@ mod tests {
         let critical = first_critical_mistake(&moves, &losses).expect("expected mistake");
         assert_eq!(critical.ply, 3);
         assert_eq!(critical.class, MistakeClass::Mistake);
+    }
+
+    #[test]
+    fn converts_game_moves_to_fen_and_uci() {
+        let moves = vec!["e4".to_string(), "e5".to_string(), "Nf3".to_string()];
+        let fen_and_uci = game_to_fen_and_uci(&moves).unwrap();
+        assert_eq!(fen_and_uci.len(), 3);
+        assert_eq!(
+            fen_and_uci[0].0,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        );
+        assert_eq!(fen_and_uci[0].1, "e2e4");
+        assert_eq!(fen_and_uci[1].1, "e7e5");
+        assert_eq!(fen_and_uci[2].1, "g1f3");
+    }
+
+    #[test]
+    fn walks_nested_variations() {
+        let pgn = r#"
+[Event "Repertoire"]
+
+1. e4 e5 (1... c5 2. Nf3 (2. Nc3 Nc6) 2... d6) 2. Nf3 Nc6 1-0
+"#;
+        let walked = walk_pgn_variations(pgn).unwrap();
+        // Mainline: e4 e5 Nf3 Nc6 = 4. Var A: c5 Nf3 d6 = 3. Var B (nested): Nc3 Nc6 = 2.
+        assert_eq!(walked.len(), 9);
+        let sans: Vec<&str> = walked.iter().map(|w| w.san.as_str()).collect();
+        assert!(sans.contains(&"c5"));
+        assert!(sans.contains(&"Nc3"));
+        // The two 2.Nf3 moves come from different parents (after e5 vs after c5)
+        let nf3: Vec<&WalkedMove> = walked.iter().filter(|w| w.uci == "g1f3").collect();
+        assert_eq!(nf3.len(), 2);
+        assert_ne!(nf3[0].parent_fen, nf3[1].parent_fen);
+    }
+
+    #[test]
+    fn walks_multiple_games_and_skips_malformed() {
+        let pgn = r#"
+[Event "One"]
+
+1. d4 d5 1/2-1/2
+
+[Event "Two"]
+
+1. e4 Qxe4 1-0
+
+[Event "Three"]
+
+1. c4 e5 *
+"#;
+        let walked = walk_pgn_variations(pgn).unwrap();
+        // Game Two dies at illegal Qxe4 after emitting e4; Games One and Three emit 2 each.
+        let sans: Vec<&str> = walked.iter().map(|w| w.san.as_str()).collect();
+        assert!(sans.contains(&"d4"));
+        assert!(sans.contains(&"c4"));
+        assert_eq!(walked.len(), 5);
+    }
+
+    #[test]
+    fn strips_comments_nags_and_annotations() {
+        let pgn = "[Event \"X\"]\n\n1. e4! {best by test} $1 e5?? 2. Nf3 1-0";
+        let walked = walk_pgn_variations(pgn).unwrap();
+        assert_eq!(walked.len(), 3);
+        assert_eq!(walked[0].san, "e4");
+        assert_eq!(walked[1].san, "e5");
+    }
+
+    #[test]
+    fn semicolon_comment_skips_only_to_end_of_line() {
+        let pgn = "[Event \"X\"]\n\n1. e4 e5 ; best by test\n2. Nf3 Nc6 1-0";
+        let walked = walk_pgn_variations(pgn).unwrap();
+        assert_eq!(walked.len(), 4);
+        assert_eq!(walked[2].san, "Nf3");
+        assert_eq!(walked[3].san, "Nc6");
+    }
+
+    #[test]
+    fn unspaced_move_numbers_keep_the_move() {
+        let pgn = "[Event \"X\"]\n\n1.e4 e5 2.Nf3 1-0";
+        let walked = walk_pgn_variations(pgn).unwrap();
+        assert_eq!(walked.len(), 3);
+        let sans: Vec<&str> = walked.iter().map(|w| w.san.as_str()).collect();
+        assert_eq!(sans, vec!["e4", "e5", "Nf3"]);
     }
 }

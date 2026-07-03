@@ -1,0 +1,25 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
+
+[[bin]]
+name = "mock-stockfish"
+path = "src/mock_stockfish.rs"
+
+[dependencies]
+db_manager = { path = "../db_manager" }
+engine_controller = { path = "../engine_controller" }
+pgn_processor = { path = "../pgn_processor" }
+mastery_ui = { path = "../mastery_ui" }
+lichess_client = { path = "../lichess_client" }
+chesscom_client = { path = "../chesscom_client" }
+shakmaty = "0.26"
+rusqlite = { version = "0.31", features = ["bundled"] }
+slint = "1.6"
+dotenvy = "0.15"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }

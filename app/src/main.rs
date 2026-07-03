@@ -1,0 +1,2845 @@
+mod accuracy;
+mod scraper;
+mod srs;
+mod tree;
+mod weakness;
+
+use db_manager::{GameRecord, PositionRecord, SqliteStore, TrainingEventRecord, TrainingStore};
+use engine_controller::{AnalysisConfig, StockfishEngine};
+use shakmaty::uci::Uci;
+use shakmaty::{CastlingMode, Chess, Position};
+use slint::Model;
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+slint::slint! {
+    import { Button, ScrollView, LineEdit, TextEdit } from "std-widgets.slint";
+
+    struct GameEntry {
+        id: string,
+        white: string,
+        black: string,
+        result: string,
+        date: string,
+        pgn: string,
+    }
+
+    struct OpeningLineEntry {
+        id: string,
+        name: string,
+        moves: string,
+        confidence: float,
+        start_fen: string,
+    }
+
+    struct HistoryEntry {
+        kind: string,
+        target: string,
+        outcome: string,
+        delta: float,
+        date: string,
+    }
+
+    component SidebarButton inherits Rectangle {
+        in property <string> text;
+        in property <bool> active;
+        callback clicked;
+        height: 40px;
+        background: active ? #2d2d35 : #00000000;
+        border-radius: 8px;
+        animate background { duration: 150ms; }
+
+        TouchArea {
+            clicked => { root.clicked(); }
+        }
+        Text {
+            text: root.text;
+            color: active ? #ffffff : #a0a0aa;
+            font-size: 14px;
+            font-weight: active ? 700 : 500;
+            x: 16px;
+            vertical-alignment: center;
+        }
+    }
+
+    export component AppWindow inherits Window {
+        title: "Grandmaster Forge";
+        min-width: 1000px;
+        min-height: 700px;
+        background: #121214;
+
+        pure function piece-symbol(piece: string) -> string {
+            return piece == "P" || piece == "p" ? "♟"
+                : piece == "N" || piece == "n" ? "♞"
+                : piece == "B" || piece == "b" ? "♝"
+                : piece == "R" || piece == "r" ? "♜"
+                : piece == "Q" || piece == "q" ? "♛"
+                : piece == "K" || piece == "k" ? "♚"
+                : "";
+        }
+
+        pure function piece-color(piece: string) -> color {
+            return piece == "P" || piece == "N" || piece == "B" || piece == "R" || piece == "Q" || piece == "K"
+                ? #f8fafc
+                : piece == ""
+                    ? #00000000
+                    : #111827;
+        }
+
+        // Properties for dashboard
+        in-out property <string> rec-mode: "ReviewRecentGame";
+        in-out property <string> rec-reason: "Review your latest game to generate new improvement lines.";
+        in-out property <int> stat-unreviewed: 0;
+        in-out property <int> stat-blunders: 0;
+        in-out property <int> stat-openings: 0;
+        in-out property <int> stat-rating: 1500;
+
+        // Lists
+        in-out property <[GameEntry]> games: [];
+        in-out property <[OpeningLineEntry]> opening-lines: [];
+        in-out property <[HistoryEntry]> history: [];
+
+        // Active screen: "dashboard", "repertoire", "review"
+        in-out property <string> active-screen: "dashboard";
+
+        // Active game review details
+        in-out property <string> selected-game-id: "";
+        in-out property <string> selected-game-title: "No Game Selected";
+        in-out property <[string]> selected-game-moves: [];
+        in-out property <[string]> selected-game-losses: [];
+        in-out property <[string]> selected-game-classes: [];
+        in-out property <[string]> selected-game-fens: [];
+        in-out property <int> selected-move-index: -1;
+        in-out property <string> selected-move-eval: "";
+        in-out property <string> selected-move-best: "";
+
+        // Interactive board pieces (64 strings)
+        in-out property <[string]> board-pieces: [
+            "r", "n", "b", "q", "k", "b", "n", "r",
+            "p", "p", "p", "p", "p", "p", "p", "p",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "P", "P", "P", "P", "P", "P", "P", "P",
+            "R", "N", "B", "Q", "K", "B", "N", "R"
+        ];
+        in-out property <int> board-selected-square: -1;
+
+        // Drill state
+        in-out property <string> drill-line-id: "";
+        in-out property <string> drill-name: "";
+        in-out property <string> drill-instructions: "Select a line to drill.";
+        in-out property <bool> drill-active: false;
+
+        // Status / analysis properties
+        in-out property <string> weakness-summary: "";
+        in-out property <string> sync-status: "Not synced";
+        in-out property <string> chesscom-sync-status: "Not synced";
+        in-out property <string> tree-status: "";
+
+        // Repertoire builder state
+        in-out property <string> builder-fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        in-out property <string> builder-moves: "";
+        in-out property <string> builder-color: "White";
+        in-out property <string> builder-line-name: "";
+        in-out property <int> builder-selected-square: -1;
+        in-out property <[string]> builder-board-pieces: [
+            "r","n","b","q","k","b","n","r",
+            "p","p","p","p","p","p","p","p",
+            "","","","","","","","",
+            "","","","","","","","",
+            "","","","","","","","",
+            "","","","","","","","",
+            "P","P","P","P","P","P","P","P",
+            "R","N","B","Q","K","B","N","R"
+        ];
+
+        // Drill branch info
+        in-out property <string> drill-branch-info: "";
+
+        // Import Lines screen state
+        in-out property <string> import-status: "";
+        in-out property <string> import-side: "White";
+
+        // Play-vs-bot screen state
+        in-out property <[string]> play-board-pieces: [
+            "r", "n", "b", "q", "k", "b", "n", "r",
+            "p", "p", "p", "p", "p", "p", "p", "p",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "P", "P", "P", "P", "P", "P", "P", "P",
+            "R", "N", "B", "Q", "K", "B", "N", "R"
+        ];
+        in-out property <int> play-selected-square: -1;
+        in-out property <string> play-status: "Choose color and start a game.";
+        in-out property <string> play-summary: "";
+        in-out property <string> play-color: "White";
+        in-out property <int> play-elo: 1500;
+        in-out property <bool> play-active: false;
+        in-out property <string> play-book-state: "";
+
+        // Callbacks
+        callback select-screen(string);
+        callback import-lines(string, string);
+        callback sync-studies(string);
+        callback import-pgn(string);
+        callback select-game(string);
+        callback select-game-move(int);
+        callback select-repertoire-line(string);
+        callback click-board-square(int);
+        callback start-drill();
+        callback sync-lichess(string);
+        callback sync-chesscom();
+        callback build-opening-tree();
+        callback load-puzzle();
+        callback explorer-select-move(string);
+
+        // Repertoire builder callbacks
+        callback builder-click-square(int);
+        callback builder-save-line();
+        callback builder-reset();
+        callback builder-set-color(string);
+        callback builder-undo();
+        callback suggest-pgn-lines();
+        callback adopt-explorer(string);
+
+        // Play-vs-bot callbacks
+        callback play-new-game(string, int);
+        callback play-click-square(int);
+        callback play-resign();
+        callback play-review-game();
+
+        HorizontalLayout {
+            // Sidebar
+            Rectangle {
+                width: 220px;
+                background: #1a1a1e;
+                border-color: #27272a;
+                border-width: 1px;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 24px;
+                    alignment: start;
+
+                    // Brand Title
+                    Text {
+                        text: "FORGE MASTER";
+                        color: #a78bfa; // light violet
+                        font-size: 18px;
+                        font-weight: 800;
+                        horizontal-alignment: center;
+                    }
+
+                    // Navigation Menu
+                    VerticalLayout {
+                        spacing: 8px;
+                        SidebarButton {
+                            text: "Dashboard";
+                            active: root.active-screen == "dashboard";
+                            clicked => { root.select-screen("dashboard"); }
+                        }
+                        SidebarButton {
+                            text: "Repertoire Browser";
+                            active: root.active-screen == "repertoire";
+                            clicked => { root.select-screen("repertoire"); }
+                        }
+                        SidebarButton {
+                            text: "Game Review";
+                            active: root.active-screen == "review";
+                            clicked => { root.select-screen("review"); }
+                        }
+                        SidebarButton {
+                            text: "Opening Builder";
+                            active: root.active-screen == "builder";
+                            clicked => { root.select-screen("builder"); }
+                        }
+                        SidebarButton {
+                            text: "Import Lines";
+                            active: root.active-screen == "import";
+                            clicked => { root.select-screen("import"); }
+                        }
+                        SidebarButton {
+                            text: "Play vs Bot";
+                            active: root.active-screen == "play";
+                            clicked => { root.select-screen("play"); }
+                        }
+                    }
+                }
+            }
+
+            // Main Area
+            Rectangle {
+                background: #121214;
+                padding: 24px;
+
+                // 1. Dashboard Screen
+                if (root.active-screen == "dashboard") : VerticalLayout {
+                    spacing: 24px;
+                    alignment: start;
+
+                    // Header Action Card with linear gradient
+                    Rectangle {
+                        height: 160px;
+                        background: @linear-gradient(135deg, #6d28d9 0%, #4f46e5 100%);
+                        border-radius: 12px;
+                        padding: 20px;
+
+                        VerticalLayout {
+                            alignment: space-between;
+                            VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: "DAILY TRAINING RECOMMENDATION";
+                                    color: #c084fc;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                }
+                                Text {
+                                    text: root.rec-mode == "ReviewRecentGame" ? "Review Your Games" :
+                                          root.rec-mode == "BlunderPrevention" ? "Blunder Prevention Session" :
+                                          root.rec-mode == "OpeningRepetition" ? "Drill Openings" : "Solve Chess Puzzles";
+                                    color: #ffffff;
+                                    font-size: 20px;
+                                    font-weight: 800;
+                                }
+                                Text {
+                                    text: root.rec-reason;
+                                    color: #e4e4e7;
+                                    font-size: 13px;
+                                }
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                Button {
+                                    text: "Start Activity";
+                                    clicked => {
+                                        if (root.rec-mode == "ReviewRecentGame") {
+                                            root.select-screen("review");
+                                        } else if (root.rec-mode == "OpeningRepetition") {
+                                            root.select-screen("repertoire");
+                                        } else {
+                                            root.select-screen("repertoire");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Stats Grid (4 Cards)
+                    HorizontalLayout {
+                        spacing: 16px;
+                        height: 100px;
+
+                        // Card 1
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #27272a;
+                            border-width: 1px;
+                            padding: 16px;
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: "Unreviewed Games"; color: #a1a1aa; font-size: 12px; }
+                                Text { text: root.stat-unreviewed; color: #ffffff; font-size: 24px; font-weight: 700; }
+                            }
+                        }
+                        // Card 2
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #27272a;
+                            border-width: 1px;
+                            padding: 16px;
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: "Blunder Hotspots"; color: #a1a1aa; font-size: 12px; }
+                                Text { text: root.stat-blunders; color: root.stat-blunders > 0 ? #f43f5e : #10b981; font-size: 24px; font-weight: 700; }
+                            }
+                        }
+                        // Card 3
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #27272a;
+                            border-width: 1px;
+                            padding: 16px;
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: "Due Openings"; color: #a1a1aa; font-size: 12px; }
+                                Text { text: root.stat-openings; color: root.stat-openings > 0 ? #fbbf24 : #10b981; font-size: 24px; font-weight: 700; }
+                            }
+                        }
+                        // Card 4
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #27272a;
+                            border-width: 1px;
+                            padding: 16px;
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: "Training Rating"; color: #a1a1aa; font-size: 12px; }
+                                Text { text: root.stat-rating; color: #fbbf24; font-size: 24px; font-weight: 700; }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        height: 40px;
+                        Button { text: "Sync Lichess Games"; clicked => { root.sync-lichess(""); } }
+                        Text { text: root.sync-status; color: #a1a1aa; font-size: 12px; vertical-alignment: center; }
+                        Button { text: "Sync Chess.com Games"; clicked => { root.sync-chesscom(); } }
+                        Text { text: root.chesscom-sync-status; color: #a1a1aa; font-size: 12px; vertical-alignment: center; }
+                    }
+
+                    // Activity History
+                    VerticalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: "Recent Training Log";
+                            color: #ffffff;
+                            font-size: 16px;
+                            font-weight: 700;
+                        }
+
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #27272a;
+                            border-width: 1px;
+                            height: 200px;
+                            padding: 12px;
+
+                            ScrollView {
+                                VerticalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    for entry in root.history: Rectangle {
+                                        height: 45px;
+                                        background: #27272a;
+                                        border-radius: 6px;
+                                        padding: 8px;
+                                        HorizontalLayout {
+                                            alignment: space-between;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Text { text: entry.target; color: #ffffff; font-size: 13px; font-weight: 700; }
+                                                Text { text: entry.date + " • " + entry.kind; color: #a1a1aa; font-size: 11px; }
+                                            }
+                                            HorizontalLayout {
+                                                spacing: 12px;
+                                                Text {
+                                                    text: entry.outcome;
+                                                    color: entry.outcome == "Correct" ? #10b981 : #f43f5e;
+                                                    font-size: 13px;
+                                                    font-weight: 700;
+                                                }
+                                                Text {
+                                                    text: (entry.delta >= 0.0 ? "+" : "") + entry.delta;
+                                                    color: entry.delta >= 0.0 ? #10b981 : #f43f5e;
+                                                    font-size: 13px;
+                                                    font-weight: 700;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Repertoire Browser Screen
+                if (root.active-screen == "repertoire") : HorizontalLayout {
+                    spacing: 24px;
+
+                    // Repertoire Line List (Left Column)
+                    VerticalLayout {
+                        width: 380px;
+                        spacing: 12px;
+                        Text {
+                            text: "Active Repertoires";
+                            color: #ffffff;
+                            font-size: 18px;
+                            font-weight: 700;
+                        }
+
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #27272a;
+                            border-width: 1px;
+                            padding: 12px;
+
+                            ScrollView {
+                                VerticalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    for line in root.opening-lines: Rectangle {
+                                        background: root.drill-line-id == line.id ? #3f3f46 : #27272a;
+                                        border-radius: 8px;
+                                        padding: 12px;
+                                        height: 90px;
+
+                                        TouchArea {
+                                            clicked => {
+                                                root.select-repertoire-line(line.id);
+                                            }
+                                        }
+
+                                        VerticalLayout {
+                                            alignment: space-between;
+                                            HorizontalLayout {
+                                                alignment: space-between;
+                                                Text { text: line.name; color: #ffffff; font-size: 14px; font-weight: 700; }
+                                                Text { text: "Conf: " + floor(line.confidence * 100.0) + "%"; color: #a78bfa; font-size: 12px; }
+                                            }
+                                            Text { text: line.moves; color: #a1a1aa; font-size: 12px; height: 16px; overflow: elide; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Interactive Chess Board and Drill View (Right Column)
+                    VerticalLayout {
+                        spacing: 16px;
+                        alignment: center;
+
+                        // Chess board container
+                        Rectangle {
+                            width: 360px;
+                            height: 360px;
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #3f3f46;
+                            border-width: 2px;
+
+                            for index in 64: Rectangle {
+                                x: mod(index, 8) * 45px;
+                                y: floor(index / 8) * 45px;
+                                width: 45px;
+                                height: 45px;
+                                background: (root.board-selected-square == index)
+                                    ? #fcd34d
+                                    : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
+
+                                Text {
+                                    text: root.piece-symbol(root.board-pieces[index]);
+                                    font-size: 28px;
+                                    font-family: "Segoe UI Symbol";
+                                    color: root.piece-color(root.board-pieces[index]);
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                TouchArea {
+                                    clicked => {
+                                        root.click-board-square(index);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Drill Controls
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            padding: 16px;
+                            width: 360px;
+
+                            VerticalLayout {
+                                spacing: 12px;
+                                Text {
+                                    text: root.drill-name == "" ? "No Line Selected" : root.drill-name;
+                                    color: #ffffff;
+                                    font-size: 15px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: root.drill-instructions;
+                                    color: #e4e4e7;
+                                    font-size: 13px;
+                                    horizontal-alignment: center;
+                                }
+                                HorizontalLayout {
+                                    alignment: center;
+                                    if (!root.drill-active && root.drill-line-id != "") : Button {
+                                        text: "Start Drill";
+                                        clicked => { root.start-drill(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. Game Review Screen
+                if (root.active-screen == "review") : HorizontalLayout {
+                    spacing: 24px;
+
+                    // Game Selection & PGN Import (Left Column)
+                    VerticalLayout {
+                        width: 360px;
+                        spacing: 16px;
+
+                        // Import PGN Panel
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #27272a;
+                            border-width: 1px;
+                            padding: 16px;
+                            height: 180px;
+
+                            VerticalLayout {
+                                spacing: 12px;
+                                Text { text: "Import PGN Archive"; color: #ffffff; font-size: 14px; font-weight: 700; }
+                                pgn-input := LineEdit {
+                                    placeholder-text: "Paste PGN string here...";
+                                }
+                                Button {
+                                    text: "Import & Analyze Game";
+                                    clicked => {
+                                        root.import-pgn(pgn-input.text);
+                                        pgn-input.text = "";
+                                    }
+                                }
+                            }
+                        }
+
+                        // Game List
+                        Text {
+                            text: "Reviewed Games";
+                            color: #ffffff;
+                            font-size: 16px;
+                            font-weight: 700;
+                        }
+
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #27272a;
+                            border-width: 1px;
+                            padding: 12px;
+
+                            ScrollView {
+                                VerticalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    for game in root.games: Rectangle {
+                                        background: root.selected-game-id == game.id ? #3f3f46 : #27272a;
+                                        border-radius: 8px;
+                                        padding: 12px;
+                                        height: 85px;
+
+                                        TouchArea {
+                                            clicked => {
+                                                root.select-game(game.id);
+                                            }
+                                        }
+
+                                        VerticalLayout {
+                                            alignment: space-between;
+                                            Text { text: game.white + " vs " + game.black; color: #ffffff; font-size: 13px; font-weight: 700; }
+                                            HorizontalLayout {
+                                                alignment: space-between;
+                                                Text { text: game.date; color: #a1a1aa; font-size: 11px; }
+                                                Text { text: game.result; color: #fbbf24; font-size: 11px; font-weight: 700; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Game Evaluation and Timeline Board (Right Column)
+                    if (root.selected-game-id != "") : HorizontalLayout {
+                        spacing: 20px;
+
+                        // Board View
+                        VerticalLayout {
+                            spacing: 12px;
+                            alignment: center;
+
+                            Rectangle {
+                                width: 360px;
+                                height: 360px;
+                                background: #1a1a1e;
+                                border-radius: 8px;
+                                border-color: #3f3f46;
+                                border-width: 2px;
+
+                                for index in 64: Rectangle {
+                                    x: mod(index, 8) * 45px;
+                                    y: floor(index / 8) * 45px;
+                                    width: 45px;
+                                    height: 45px;
+                                    background: (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
+
+                                    Text {
+                                        text: root.piece-symbol(root.board-pieces[index]);
+                                        font-size: 28px;
+                                        font-family: "Segoe UI Symbol";
+                                        color: root.piece-color(root.board-pieces[index]);
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            // Engine Eval Block
+                            Rectangle {
+                                background: #1a1a1e;
+                                border-radius: 8px;
+                                padding: 12px;
+                                width: 360px;
+
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    Text { text: "POSITION ANALYSIS"; color: #a1a1aa; font-size: 11px; font-weight: 700; }
+                                    Text { text: "Evaluation: " + root.selected-move-eval; color: #ffffff; font-size: 14px; font-weight: 700; }
+                                    Text { text: "Best Continuation: " + root.selected-move-best; color: #10b981; font-size: 12px; }
+                                }
+                            }
+                        }
+
+                        // Move Timeline
+                        VerticalLayout {
+                            width: 240px;
+                            spacing: 12px;
+
+                            Text {
+                                text: root.selected-game-title;
+                                color: #ffffff;
+                                font-size: 14px;
+                                font-weight: 700;
+                                height: 20px;
+                                overflow: elide;
+                            }
+
+                            Rectangle {
+                                background: #1a1a1e;
+                                border-radius: 8px;
+                                border-color: #27272a;
+                                border-width: 1px;
+                                padding: 8px;
+
+                                ScrollView {
+                                    VerticalLayout {
+                                        spacing: 6px;
+                                        alignment: start;
+                                        for move-str[index] in root.selected-game-moves: Rectangle {
+                                            background: root.selected-move-index == index ? #3f3f46 : #27272a;
+                                            border-radius: 6px;
+                                            height: 40px;
+                                            padding: 8px;
+
+                                            TouchArea {
+                                                clicked => {
+                                                    root.select-game-move(index);
+                                                }
+                                            }
+
+                                            HorizontalLayout {
+                                                alignment: space-between;
+                                                Text {
+                                                    text: (floor(index / 2) + 1) + ". " + (mod(index, 2) == 0 ? "" : "... ") + move-str;
+                                                    color: #ffffff;
+                                                    font-size: 13px;
+                                                    font-weight: 700;
+                                                }
+                                                // Blunder indicators
+                                                if (root.selected-game-losses[index] != "") : Rectangle {
+                                                    background: root.selected-game-classes[index] == "Blunder" ? #f43f5e :
+                                                                root.selected-game-classes[index] == "Mistake" ? #f59e0b : #eab308;
+                                                    border-radius: 4px;
+                                                    padding: 4px;
+                                                    height: 20px;
+                                                    HorizontalLayout {
+                                                        Text {
+                                                            text: root.selected-game-classes[index] + " (-" + root.selected-game-losses[index] + ")";
+                                                            color: #ffffff;
+                                                            font-size: 10px;
+                                                            font-weight: 700;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (root.selected-game-id == "") : VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "Select a game from the list to review move evaluations.";
+                            color: #a1a1aa;
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                // 4. Opening Builder Screen
+                if (root.active-screen == "builder") : HorizontalLayout {
+                    spacing: 16px;
+                    padding: 0px;
+
+                    // Left: board + controls
+                    VerticalLayout {
+                        width: 480px;
+                        spacing: 12px;
+
+                        // Color picker
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Train as:"; color: #a1a1aa; font-size: 13px; vertical-alignment: center; }
+                            Rectangle {
+                                width: 80px; height: 32px;
+                                background: root.builder-color == "White" ? #6d28d9 : #27272a;
+                                border-radius: 6px;
+                                TouchArea { clicked => { root.builder-set-color("White"); } }
+                                Text { text: "White"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                width: 80px; height: 32px;
+                                background: root.builder-color == "Black" ? #6d28d9 : #27272a;
+                                border-radius: 6px;
+                                TouchArea { clicked => { root.builder-set-color("Black"); } }
+                                Text { text: "Black"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+
+                        // 8×8 board
+                        Rectangle {
+                            width: 360px;
+                            height: 360px;
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #3f3f46;
+                            border-width: 2px;
+
+                            for index in 64: Rectangle {
+                                x: mod(index, 8) * 45px;
+                                y: floor(index / 8) * 45px;
+                                width: 45px;
+                                height: 45px;
+                                background: (root.builder-selected-square == index)
+                                    ? #7c3aed
+                                    : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
+                                Text {
+                                    text: root.piece-symbol(root.builder-board-pieces[index]);
+                                    font-size: 28px;
+                                    font-family: "Segoe UI Symbol";
+                                    color: root.piece-color(root.builder-board-pieces[index]);
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                TouchArea {
+                                    clicked => { root.builder-click-square(index); }
+                                }
+                            }
+                        }
+
+                        // Undo / Reset buttons
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                height: 36px; border-radius: 6px; background: #374151;
+                                TouchArea { clicked => { root.builder-undo(); } }
+                                Text { text: "Undo"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                height: 36px; border-radius: 6px; background: #374151;
+                                TouchArea { clicked => { root.builder-reset(); } }
+                                Text { text: "Reset"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                    }
+
+                    // Right: line name + move list + save + PGN suggest
+                    VerticalLayout {
+                        spacing: 12px;
+                        alignment: start;
+
+                        Text { text: "Line Name"; color: #a1a1aa; font-size: 12px; }
+                        LineEdit {
+                            height: 36px;
+                            placeholder-text: "e.g. Ruy Lopez — White";
+                            text <=> root.builder-line-name;
+                        }
+
+                        Text { text: "Moves Staged"; color: #a1a1aa; font-size: 12px; }
+                        Rectangle {
+                            height: 120px;
+                            background: #1c1c1e;
+                            border-radius: 8px;
+                            border-color: #3f3f46;
+                            border-width: 1px;
+                            Text {
+                                text: root.builder-moves == "" ? "Play moves on the board…" : root.builder-moves;
+                                color: root.builder-moves == "" ? #71717a : #e4e4e7;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // Save button
+                        Rectangle {
+                            height: 42px;
+                            background: @linear-gradient(90deg, #6d28d9, #4f46e5);
+                            border-radius: 8px;
+                            TouchArea { clicked => { root.builder-save-line(); } }
+                            Text {
+                                text: "Save Line to Repertoire";
+                                color: white;
+                                font-size: 14px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Suggest from PGN
+                        Rectangle {
+                            height: 36px;
+                            background: #27272a;
+                            border-radius: 8px;
+                            TouchArea { clicked => { root.suggest-pgn-lines(); } }
+                            Text {
+                                text: "Suggest Lines from Last PGN";
+                                color: #a78bfa;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 36px;
+                            background: #27272a;
+                            border-radius: 8px;
+                            TouchArea { clicked => { root.adopt-explorer(root.builder-color); } }
+                            Text {
+                                text: "Adopt Master Lines from Current Position";
+                                color: #a78bfa; font-size: 13px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                        Text { text: root.tree-status; color: #a1a1aa; font-size: 12px; }
+                    }
+                }
+
+                // 5. Import Lines Screen
+                if (root.active-screen == "import") : VerticalLayout {
+                    spacing: 16px;
+                    alignment: start;
+                    Text { text: "Import Repertoire Lines"; color: #ffffff; font-size: 18px; font-weight: 700; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Repertoire side:"; color: #a1a1aa; font-size: 13px; vertical-alignment: center; }
+                        Rectangle {
+                            width: 80px; height: 32px;
+                            background: root.import-side == "White" ? #6d28d9 : #27272a;
+                            border-radius: 6px;
+                            TouchArea { clicked => { root.import-side = "White"; } }
+                            Text { text: "White"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        Rectangle {
+                            width: 80px; height: 32px;
+                            background: root.import-side == "Black" ? #6d28d9 : #27272a;
+                            border-radius: 6px;
+                            TouchArea { clicked => { root.import-side = "Black"; } }
+                            Text { text: "Black"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                    import-input := TextEdit {
+                        height: 260px;
+                        placeholder-text: "Paste PGN here — variations included. Multiple games OK.";
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Button {
+                            text: "Import PGN Lines";
+                            clicked => { root.import-lines(import-input.text, root.import-side); import-input.text = ""; }
+                        }
+                        Button {
+                            text: "Sync My Lichess Studies";
+                            clicked => { root.sync-studies(root.import-side); }
+                        }
+                    }
+                    Text { text: root.import-status; color: #a78bfa; font-size: 13px; }
+                }
+
+                // 6. Play vs Bot Screen
+                if (root.active-screen == "play") : HorizontalLayout {
+                    spacing: 24px;
+                    // Board
+                    Rectangle {
+                        width: 360px; height: 360px;
+                        background: #1a1a1e; border-radius: 8px;
+                        border-color: #3f3f46; border-width: 2px;
+                        for index in 64: Rectangle {
+                            x: mod(index, 8) * 45px;
+                            y: floor(index / 8) * 45px;
+                            width: 45px; height: 45px;
+                            background: (root.play-selected-square == index)
+                                ? #fcd34d
+                                : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
+                            Text {
+                                text: root.piece-symbol(root.play-board-pieces[index]);
+                                font-size: 28px;
+                                font-family: "Segoe UI Symbol";
+                                color: root.piece-color(root.play-board-pieces[index]);
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            TouchArea { clicked => { root.play-click-square(index); } }
+                        }
+                    }
+                    // Controls
+                    VerticalLayout {
+                        spacing: 12px; alignment: start;
+                        Text { text: "Play vs Book Bot"; color: #ffffff; font-size: 18px; font-weight: 700; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                width: 80px; height: 32px;
+                                background: root.play-color == "White" ? #6d28d9 : #27272a;
+                                border-radius: 6px;
+                                TouchArea { clicked => { root.play-color = "White"; } }
+                                Text { text: "White"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                width: 80px; height: 32px;
+                                background: root.play-color == "Black" ? #6d28d9 : #27272a;
+                                border-radius: 6px;
+                                TouchArea { clicked => { root.play-color = "Black"; } }
+                                Text { text: "Black"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Bot Elo:"; color: #a1a1aa; font-size: 13px; vertical-alignment: center; }
+                            elo-input := LineEdit { width: 80px; text: "1500"; }
+                        }
+                        Button {
+                            text: "New Game";
+                            clicked => { root.play-new-game(root.play-color, elo-input.text.to-float()); }
+                        }
+                        if (root.play-active) : Button {
+                            text: "Resign";
+                            clicked => { root.play-resign(); }
+                        }
+                        Text { text: root.play-book-state; color: #a78bfa; font-size: 13px; }
+                        Text { text: root.play-status; color: #e4e4e7; font-size: 13px; }
+                        Text { text: root.play-summary; color: #a1a1aa; font-size: 12px; wrap: word-wrap; width: 300px; }
+                        if (!root.play-active && root.play-summary != "") : Button {
+                            text: "Review This Game";
+                            clicked => { root.play-review-game(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Convert FEN string to 64 side-aware piece codes so the UI can pick glyphs/colors.
+fn fen_to_pieces(fen: &str) -> Vec<slint::SharedString> {
+    let board_part = fen.split_whitespace().next().unwrap_or(fen);
+    let mut pieces = vec![slint::SharedString::from(""); 64];
+    let mut square_idx = 0usize;
+
+    for ch in board_part.chars() {
+        if ch == '/' {
+            continue;
+        }
+        if let Some(digit) = ch.to_digit(10) {
+            square_idx += digit as usize;
+        } else {
+            if square_idx < 64 {
+                pieces[square_idx] = slint::SharedString::from(ch.to_string());
+            }
+            square_idx += 1;
+        }
+    }
+    pieces
+}
+
+// Helper to convert board index (0..63) to chess square name (e.g. e2)
+fn index_to_square(idx: usize) -> String {
+    let col = idx % 8;
+    let row = idx / 8;
+    let file = (b'a' + col as u8) as char;
+    let rank = (b'8' - row as u8) as char;
+    format!("{}{}", file, rank)
+}
+
+// Compute dynamic centipawn loss and mistake class
+fn score_to_centipawns(score: engine_controller::Score) -> i32 {
+    match score {
+        engine_controller::Score::Centipawns(cp) => cp,
+        engine_controller::Score::Mate(m) => {
+            if m > 0 {
+                10000 - m * 100
+            } else {
+                -10000 - m * 100
+            }
+        }
+    }
+}
+
+fn find_stockfish_path() -> String {
+    if let Ok(path) = std::env::var("STOCKFISH_PATH") {
+        if std::path::Path::new(&path).exists() {
+            return path;
+        }
+    }
+
+    // Prefer a real stockfish from PATH before falling back to the mock engine
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(if cfg!(windows) {
+                "stockfish.exe"
+            } else {
+                "stockfish"
+            });
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    // Try target/debug/mock-stockfish.exe or mock-stockfish
+    let mut path = std::env::current_dir().unwrap_or_default();
+    path.push("target");
+    path.push("debug");
+    #[cfg(windows)]
+    path.push("mock-stockfish.exe");
+    #[cfg(not(windows))]
+    path.push("mock-stockfish");
+
+    if path.exists() {
+        return path.to_string_lossy().to_string();
+    }
+
+    // Dynamic compilation trigger
+    println!("Mock Stockfish executable not found. Compiling mock Stockfish dynamically...");
+    let _ = std::process::Command::new("cargo")
+        .args(["build", "--bin", "mock-stockfish"])
+        .status();
+
+    if path.exists() {
+        return path.to_string_lossy().to_string();
+    }
+
+    "mock-stockfish".to_string()
+}
+
+/// Insert a game + its per-ply positions (unanalyzed). Existing rows are untouched.
+fn ingest_pgn_game(
+    db: &mut SqliteStore,
+    game_id: &str,
+    source: &str,
+    pgn: &str,
+    fallback_date: Option<String>,
+) -> Result<(), String> {
+    let parsed = pgn_processor::parse_pgn(pgn);
+    let game = GameRecord {
+        id: game_id.to_string(),
+        source: source.to_string(),
+        white: parsed
+            .headers
+            .get("White")
+            .cloned()
+            .unwrap_or_else(|| "White".into()),
+        black: parsed
+            .headers
+            .get("Black")
+            .cloned()
+            .unwrap_or_else(|| "Black".into()),
+        result: parsed.result.clone(),
+        eco: parsed.headers.get("ECO").cloned(),
+        pgn: pgn.to_string(),
+        played_at: parsed
+            .headers
+            .get("Date")
+            .cloned()
+            .map(|d| d.replace('.', "-"))
+            .or(fallback_date),
+    };
+    db.insert_game(&game)?;
+    let fens_and_moves = pgn_processor::game_to_fen_and_uci(&parsed.moves)?;
+    for (ply, (fen, uci_move)) in fens_and_moves.into_iter().enumerate() {
+        db.insert_position(&PositionRecord {
+            id: format!("{}_{}", game_id, ply + 1),
+            game_id: game_id.to_string(),
+            ply: (ply + 1) as u32,
+            fen,
+            played_move: uci_move,
+            centipawn_loss: None,
+            mistake_class: None,
+        })?;
+    }
+    Ok(())
+}
+
+struct AppState {
+    db: SqliteStore,
+    stockfish_path: String,
+    // Tree-based drill session
+    drill_side: String,                                    // "White" | "Black"
+    drill_chess: Chess,                                    // current drill position (kept)
+    drill_expected: Vec<db_manager::RepertoireMoveRecord>, // my-move edges at current node
+    drill_start_edge: Option<db_manager::RepertoireMoveRecord>,
+    // Current board FEN for explorer
+    current_fen: Option<String>,
+    // Repertoire builder state
+    builder_chess: Chess,
+    builder_staged_uci: Vec<String>,
+    builder_selected_sq: Option<usize>,
+    builder_color: String,
+    // Play-vs-bot session
+    play_chess: Chess,
+    play_moves_uci: Vec<String>,
+    play_side: String, // user's color: "White" | "Black"
+    play_session: Option<engine_controller::PlaySession>,
+    play_deviations: Vec<String>,
+    play_plies_in_book: u32,
+    play_left_book_at: Option<u32>,
+}
+
+fn main() {
+    dotenvy::dotenv().ok();
+    let stockfish_path = find_stockfish_path();
+
+    // Initialize database
+    let mut db = SqliteStore::new("forge.db").expect("failed to open database file forge.db");
+    db.bootstrap().expect("failed to bootstrap database tables");
+    db.run_migrations()
+        .expect("failed to run database migrations");
+
+    let migrated = tree::migrate_legacy_lines(&mut db).unwrap_or_else(|e| {
+        eprintln!("legacy line migration failed (continuing on tree): {e}");
+        0
+    });
+    if migrated > 0 {
+        println!("Migrated {migrated} legacy opening lines into the repertoire tree.");
+    }
+
+    // Load initial data
+    let state = Arc::new(Mutex::new(AppState {
+        db,
+        stockfish_path,
+        drill_side: "White".to_string(),
+        drill_chess: Chess::default(),
+        drill_expected: Vec::new(),
+        drill_start_edge: None,
+        current_fen: None,
+        builder_chess: Chess::default(),
+        builder_staged_uci: Vec::new(),
+        builder_selected_sq: None,
+        builder_color: "White".to_string(),
+        play_chess: Chess::default(),
+        play_moves_uci: Vec::new(),
+        play_side: "White".to_string(),
+        play_session: None,
+        play_deviations: Vec::new(),
+        play_plies_in_book: 0,
+        play_left_book_at: None,
+    }));
+
+    let app = AppWindow::new().expect("failed to create Slint window");
+    let app_weak = app.as_weak();
+
+    // Setup initial data refresh helper
+    let refresh_data = {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        move || {
+            let state = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+
+            // Refresh dashboard
+            let today = tree::local_now_str();
+            let snapshot = mastery_ui::UserSnapshot {
+                opening_due: state.db.get_due_repertoire_move_count(&today).unwrap_or(0),
+                blunder_hotspots: state.db.get_blunder_hotspots_count().unwrap_or(0),
+                puzzle_rating: state.db.get_puzzle_rating("default_user").unwrap_or(1500),
+                has_unreviewed_games: state.db.get_unreviewed_games_count().unwrap_or(0) > 0,
+            };
+
+            // Weakness profile
+            let all_positions: Vec<(u32, Option<i32>, Option<String>, Option<String>)> = {
+                let mut stmt = state
+                    .db
+                    .conn
+                    .prepare(
+                        "SELECT p.ply, p.centipawn_loss, p.mistake_class, g.eco
+                     FROM positions p JOIN games g ON g.id = p.game_id",
+                    )
+                    .unwrap();
+                stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, u32>(0)?,
+                        row.get::<_, Option<i32>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+            };
+            let avg_endgame_acc = state.db.conn.query_row(
+                "SELECT COALESCE(AVG(accuracy_endgame), 100.0) FROM games WHERE accuracy_endgame IS NOT NULL",
+                [], |row| row.get::<_, f64>(0),
+            ).unwrap_or(100.0) as f32;
+            let wr = weakness::build_weakness_report(&all_positions, avg_endgame_acc);
+            app.set_weakness_summary(slint::SharedString::from(wr.top_training_priority));
+            let rec = mastery_ui::recommend_next_action(&snapshot);
+            app.set_rec_mode(slint::SharedString::from(format!("{:?}", rec.mode)));
+            app.set_rec_reason(slint::SharedString::from(rec.reason));
+            app.set_stat_unreviewed(snapshot.has_unreviewed_games as i32);
+            app.set_stat_blunders(snapshot.blunder_hotspots as i32);
+            app.set_stat_openings(snapshot.opening_due as i32);
+            app.set_stat_rating(snapshot.puzzle_rating);
+
+            // Refresh game list
+            let games = state.db.get_games().unwrap_or_default();
+            let game_entries: Vec<GameEntry> = games
+                .into_iter()
+                .map(|g| GameEntry {
+                    id: slint::SharedString::from(g.id),
+                    white: slint::SharedString::from(g.white),
+                    black: slint::SharedString::from(g.black),
+                    result: slint::SharedString::from(g.result.unwrap_or_else(|| "*".to_string())),
+                    date: slint::SharedString::from(
+                        g.played_at.unwrap_or_else(|| "2026-06-12".to_string()),
+                    ),
+                    pgn: slint::SharedString::from(g.pgn),
+                })
+                .collect();
+            app.set_games(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                game_entries,
+            ))));
+
+            // Refresh due repertoire moves (drill queue)
+            let due = state
+                .db
+                .get_due_repertoire_moves(&today)
+                .unwrap_or_default();
+            let line_entries: Vec<OpeningLineEntry> = due
+                .iter()
+                .map(|e| OpeningLineEntry {
+                    id: slint::SharedString::from(e.id.to_string()),
+                    name: slint::SharedString::from(format!("{} ({})", e.san, e.source)),
+                    moves: slint::SharedString::from(e.uci.clone()),
+                    confidence: (e.srs_reps as f32 / 10.0).min(1.0),
+                    start_fen: slint::SharedString::from(e.parent_fen.clone()),
+                })
+                .collect();
+            app.set_opening_lines(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                line_entries,
+            ))));
+
+            // Refresh training logs
+            let mut stmt = state.db.conn.prepare("SELECT kind, target_id, outcome, score_delta, created_at FROM training_events ORDER BY created_at DESC").unwrap();
+            let logs = stmt
+                .query_map([], |row| {
+                    Ok(HistoryEntry {
+                        kind: slint::SharedString::from(row.get::<_, String>(0)?),
+                        target: slint::SharedString::from(row.get::<_, String>(1)?),
+                        outcome: slint::SharedString::from(row.get::<_, String>(2)?),
+                        delta: row.get::<_, f64>(3)? as f32,
+                        date: slint::SharedString::from(row.get::<_, String>(4)?),
+                    })
+                })
+                .unwrap();
+            let mut log_list = Vec::new();
+            for log in logs {
+                if let Ok(l) = log {
+                    log_list.push(l);
+                }
+            }
+            app.set_history(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                log_list,
+            ))));
+        }
+    };
+
+    use std::rc::Rc;
+    let refresh_data = std::sync::Arc::new(refresh_data);
+    refresh_data();
+
+    // Wiring screen selection
+    {
+        let app_weak = app_weak.clone();
+        app.on_select_screen(move |screen| {
+            let app = app_weak.upgrade().unwrap();
+            app.set_active_screen(screen);
+        });
+    }
+
+    // Wiring game selection for Game Review timeline
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_select_game(move |game_id: slint::SharedString| {
+            let state = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+
+            let positions = state
+                .db
+                .get_positions_for_game(&game_id)
+                .unwrap_or_default();
+            let mut moves = Vec::new();
+            let mut losses = Vec::new();
+            let mut classes = Vec::new();
+            let mut fens = Vec::new();
+
+            for pos in &positions {
+                moves.push(slint::SharedString::from(pos.played_move.clone()));
+                losses.push(slint::SharedString::from(
+                    pos.centipawn_loss
+                        .map(|l| l.to_string())
+                        .unwrap_or_default(),
+                ));
+                classes.push(slint::SharedString::from(
+                    pos.mistake_class.clone().unwrap_or_default(),
+                ));
+                fens.push(slint::SharedString::from(pos.fen.clone()));
+            }
+
+            app.set_selected_game_id(game_id.clone());
+            app.set_selected_game_title(slint::SharedString::from("Timeline"));
+            app.set_selected_game_moves(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                moves,
+            ))));
+            app.set_selected_game_losses(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                losses,
+            ))));
+            app.set_selected_game_classes(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                classes,
+            ))));
+            app.set_selected_game_fens(slint::ModelRc::from(Rc::new(slint::VecModel::from(fens))));
+            app.set_selected_move_index(-1);
+
+            // Reset board to starting pos
+            app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"),
+            ))));
+        });
+    }
+
+    // Wiring move selection inside a game timeline
+    {
+        let app_weak = app_weak.clone();
+        app.on_select_game_move(move |idx: i32| {
+            let app = app_weak.upgrade().unwrap();
+            app.set_selected_move_index(idx);
+
+            let fens = app.get_selected_game_fens();
+            if let Some(fen) = fens.row_data(idx as usize) {
+                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                    fen_to_pieces(&fen),
+                ))));
+
+                let class = app
+                    .get_selected_game_classes()
+                    .row_data(idx as usize)
+                    .unwrap_or_default();
+                let loss = app
+                    .get_selected_game_losses()
+                    .row_data(idx as usize)
+                    .unwrap_or_default();
+
+                if class != "" {
+                    app.set_selected_move_eval(slint::SharedString::from(format!(
+                        "{} (Lost {} cp)",
+                        class, loss
+                    )));
+                } else {
+                    app.set_selected_move_eval(slint::SharedString::from("Optimal or Incomplete"));
+                }
+                app.set_selected_move_best(slint::SharedString::from(
+                    "Check bestmove in timeline.",
+                ));
+            }
+        });
+    }
+
+    // Wire repertoire line selection for drilling
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_select_repertoire_line(move |edge_id: slint::SharedString| {
+            let mut state = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            let id: i64 = match edge_id.parse() {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            if let Ok(Some(edge)) = state.db.get_repertoire_move(id) {
+                app.set_drill_line_id(edge_id);
+                app.set_drill_name(slint::SharedString::from(format!(
+                    "Drill: {} ({})",
+                    edge.san, edge.source
+                )));
+                app.set_drill_instructions(slint::SharedString::from(
+                    "Press 'Start Drill' to practice from this position.",
+                ));
+                app.set_drill_active(false);
+                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                    fen_to_pieces(&edge.parent_fen),
+                ))));
+                app.set_board_selected_square(-1);
+                state.drill_start_edge = Some(edge);
+            }
+        });
+    }
+
+    // Drill execution callbacks
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_start_drill(move || {
+            let mut state = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            let Some(edge) = state.drill_start_edge.clone() else {
+                return;
+            };
+            let Ok(Some((side, fen))) = state.db.get_node_side_and_fen(edge.parent_id) else {
+                return;
+            };
+            let parsed: shakmaty::fen::Fen = match fen.parse() {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            let Ok(pos) = parsed.into_position(CastlingMode::Standard) else {
+                return;
+            };
+            state.drill_side = side.clone();
+            state.drill_chess = pos;
+            state.drill_expected.clear();
+            drill_advance(&mut state, &app); // shared session-step helper, below
+            app.set_drill_active(true);
+        });
+    }
+
+    // Click square on interactive board (drills)
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh_data_cp = refresh_data.clone();
+        app.on_click_board_square(move |idx: i32| {
+            let mut state = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            if !app.get_drill_active() {
+                return;
+            }
+            let sel = app.get_board_selected_square();
+            if sel == -1 {
+                app.set_board_selected_square(idx);
+                return;
+            }
+            app.set_board_selected_square(-1);
+            let uci_try = format!(
+                "{}{}",
+                index_to_square(sel as usize),
+                index_to_square(idx as usize)
+            );
+
+            let today_days = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                / 86400;
+
+            let matched = state
+                .drill_expected
+                .iter()
+                .find(|e| e.uci == uci_try || e.uci == format!("{}q", uci_try))
+                .cloned();
+
+            if let Some(edge) = matched {
+                let _ = tree::grade_edge(&mut state.db, &edge, 5, today_days);
+                let event = TrainingEventRecord {
+                    id: format!("evt_{}", uuid_now()),
+                    user_id: "default_user".to_string(),
+                    kind: "repertoire_drill".to_string(),
+                    target_id: format!("{} {}", edge.san, edge.uci),
+                    outcome: "Correct".to_string(),
+                    score_delta: 15.0,
+                    created_at: tree::local_now_str(),
+                };
+                let _ = state.db.insert_training_event(&event);
+                if let Ok(uci) = edge.uci.parse::<Uci>() {
+                    if let Ok(m) = uci.to_move(&state.drill_chess) {
+                        state.drill_chess.play_unchecked(&m);
+                        let fen = shakmaty::fen::Fen::from_position(
+                            state.drill_chess.clone(),
+                            shakmaty::EnPassantMode::Legal,
+                        )
+                        .to_string();
+                        app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                            fen_to_pieces(&fen),
+                        ))));
+                    }
+                }
+                drill_advance(&mut state, &app);
+                if !app.get_drill_active() {
+                    drop(state);
+                    refresh_data_cp();
+                }
+            } else {
+                // Wrong move: fail every expected edge at this node (they were all "the answer")
+                for edge in state.drill_expected.clone() {
+                    let _ = tree::grade_edge(&mut state.db, &edge, 1, today_days);
+                }
+                let event = TrainingEventRecord {
+                    id: format!("evt_{}", uuid_now()),
+                    user_id: "default_user".to_string(),
+                    kind: "repertoire_drill".to_string(),
+                    target_id: uci_try,
+                    outcome: "Failed".to_string(),
+                    score_delta: -5.0,
+                    created_at: tree::local_now_str(),
+                };
+                let _ = state.db.insert_training_event(&event);
+                app.set_drill_instructions(slint::SharedString::from(
+                    "Not in your repertoire here — try again (this move is now due for review).",
+                ));
+                drop(state);
+                refresh_data_cp();
+            }
+        });
+    }
+
+    // Wiring PGN Ingestion & Background analysis
+    {
+        let state = state.clone();
+        let refresh_data_cp = refresh_data.clone();
+        app.on_import_pgn(move |pgn_text: slint::SharedString| {
+            if pgn_text.trim().is_empty() {
+                return;
+            }
+
+            let mut state_lock = state.lock().unwrap();
+            let parsed = pgn_processor::parse_pgn(&pgn_text);
+
+            let white = parsed.headers.get("White").cloned().unwrap_or_else(|| "WhitePlayer".to_string());
+            let black = parsed.headers.get("Black").cloned().unwrap_or_else(|| "BlackPlayer".to_string());
+            let date = parsed.headers.get("Date").cloned().unwrap_or_else(|| "2026-06-12".to_string());
+            let round = parsed.headers.get("Round").filter(|r| !r.is_empty() && *r != "?" && *r != "-");
+            let game_id = match round {
+                Some(r) => format!("{}_{}_{}_{}", white, black, date, r).replace(" ", "_"),
+                None => format!("{}_{}_{}", white, black, date).replace(" ", "_"),
+            };
+
+            let _ = ingest_pgn_game(&mut state_lock.db, &game_id, "Imported PGN", &pgn_text, Some(date));
+
+            // Trigger background thread to analyze and evaluate this game!
+            let sf_path = state_lock.stockfish_path.clone();
+            let state_thread = state.clone();
+            let refresh_thread = refresh_data_cp.clone();
+            let game_id_thread = game_id.clone();
+
+            thread::spawn(move || {
+                let mut sf = match StockfishEngine::new(&sf_path) {
+                    Ok(engine) => engine,
+                    Err(e) => {
+                        println!("Failed to launch engine: {e}");
+                        return;
+                    }
+                };
+
+                let positions = {
+                    let state = state_thread.lock().unwrap();
+                    state.db.get_positions_for_game(&game_id_thread).unwrap_or_default()
+                };
+
+                let mut losses = Vec::new();
+
+                for pos in &positions {
+                    // Analyze position
+                    let eval_res = sf.analyze_fen(&pos.fen, AnalysisConfig { depth: 8, multipv: 3 });
+                    if let Ok(analysis) = eval_res {
+                        if !analysis.variations.is_empty() {
+                            let best_score = score_to_centipawns(analysis.variations[0].score);
+
+                            // Find played move score
+                            let played_score = if analysis.bestmove == pos.played_move {
+                                best_score
+                            } else if let Some(v) = analysis.variations.iter().find(|var| !var.pv.is_empty() && var.pv[0] == pos.played_move) {
+                                score_to_centipawns(v.score)
+                            } else {
+                                // Evaluate position after played move
+                                let mut played_chess: Chess = pos.fen.parse::<sk_fen::Fen>().map(|f| f.into_position(CastlingMode::Standard).unwrap()).unwrap();
+                                let uci: Uci = pos.played_move.parse().unwrap();
+                                let m = uci.to_move(&played_chess).unwrap();
+                                played_chess.play_unchecked(&m);
+                                let next_fen = shakmaty::fen::Fen::from_position(played_chess, shakmaty::EnPassantMode::Always).to_string();
+
+                                if let Ok(next_analysis) = sf.analyze_fen(&next_fen, AnalysisConfig { depth: 8, multipv: 1 }) {
+                                    if !next_analysis.variations.is_empty() {
+                                        // It's the opponent's turn to move now, so invert evaluation
+                                        -score_to_centipawns(next_analysis.variations[0].score)
+                                    } else {
+                                        best_score
+                                    }
+                                } else {
+                                    best_score
+                                }
+                            };
+
+                            let loss = (best_score - played_score).max(0);
+                            losses.push(loss);
+
+                            let class = engine_controller::classify_centipawn_loss(loss).map(|c| format!("{:?}", c));
+
+                            // Write result back
+                            let mut state = state_thread.lock().unwrap();
+                            let mut updated_pos = pos.clone();
+                            updated_pos.centipawn_loss = Some(loss);
+                            updated_pos.mistake_class = class;
+                            let _ = state.db.insert_position(&updated_pos);
+                        } else {
+                            losses.push(0);
+                        }
+                    } else {
+                        losses.push(0);
+                    }
+                }
+
+                // Compute and persist phase-based accuracy
+                let acc_input: Vec<(u32, Option<i32>)> = positions
+                    .iter()
+                    .zip(losses.iter())
+                    .map(|(pos, &loss)| (pos.ply, Some(loss)))
+                    .collect();
+                let acc = accuracy::compute_game_accuracy(&acc_input);
+                {
+                    let mut state = state_thread.lock().unwrap();
+                    let _ = state.db.update_game_accuracy(
+                        &game_id_thread,
+                        acc.overall,
+                        acc.opening,
+                        acc.middlegame,
+                        acc.endgame,
+                    );
+                }
+
+                // Mistake tree: worst USER eval drop -> best move, top-3 replies, follow-ups.
+                let user_side = tree::user_side_for_game(&white, &black);
+                let worst = positions
+                    .iter()
+                    .zip(losses.iter())
+                    .filter(|(pos, _)| match &user_side {
+                        // ply 1,3,5.. = White's moves (odd plies)
+                        Some(s) => (pos.ply % 2 == 1) == (s == "White"),
+                        None => true,
+                    })
+                    .max_by_key(|(_, loss)| **loss);
+                if let Some((pos_record, &loss)) = worst {
+                    if loss >= 60 {
+                        let mover_is_white = pos_record.fen.split_whitespace().nth(1) == Some("w");
+                        let side = if mover_is_white { "White" } else { "Black" }.to_string();
+                        // 1) correction (my move)
+                        if let Ok(root_analysis) =
+                            sf.analyze_fen(&pos_record.fen, AnalysisConfig { depth: 12, multipv: 1 })
+                        {
+                            let best = root_analysis.bestmove.clone();
+                            let mut st = state_thread.lock().unwrap();
+                            match tree::add_move_edge(&mut st.db, &pos_record.fen, &best, &side, "mistake")
+                            {
+                                Ok((_, after_best, _)) => {
+                                    drop(st);
+                                    // 2) top-3 opponent replies
+                                    if let Ok(reply_analysis) =
+                                        sf.analyze_fen(&after_best, AnalysisConfig { depth: 10, multipv: 3 })
+                                    {
+                                        let mut seen = std::collections::HashSet::new();
+                                        for var in reply_analysis.variations.iter().take(3) {
+                                            let Some(reply) = var.pv.first() else { continue };
+                                            if !seen.insert(reply.clone()) { continue; }
+                                            let mut st = state_thread.lock().unwrap();
+                                            let Ok((_, after_reply, _)) = tree::add_move_edge(
+                                                &mut st.db, &after_best, reply, &side, "mistake",
+                                            ) else { continue };
+                                            drop(st);
+                                            // 3) my best follow-up to each reply
+                                            if let Ok(fu) = sf.analyze_fen(
+                                                &after_reply, AnalysisConfig { depth: 10, multipv: 1 },
+                                            ) {
+                                                let mut st = state_thread.lock().unwrap();
+                                                let _ = tree::add_move_edge(
+                                                    &mut st.db, &after_reply, &fu.bestmove, &side, "mistake",
+                                                );
+                                            }
+                                        }
+                                    }
+                                    let mut st = state_thread.lock().unwrap();
+                                    let event = TrainingEventRecord {
+                                        id: format!("evt_{}", uuid_now()),
+                                        user_id: "default_user".to_string(),
+                                        kind: "mistake_tree".to_string(),
+                                        target_id: game_id_thread.clone(),
+                                        outcome: format!("worst drop {loss}cp at ply {}", pos_record.ply),
+                                        score_delta: 0.0,
+                                        created_at: tree::local_now_str(),
+                                    };
+                                    let _ = st.db.insert_training_event(&event);
+                                }
+                                Err(e) => {
+                                    eprintln!("mistake-tree: failed to insert correction edge for game {}: {}", game_id_thread, e);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Trigger UI refresh
+                let _ = slint::invoke_from_event_loop(move || {
+                    refresh_thread();
+                });
+            });
+
+            // Local updates
+            drop(state_lock);
+            refresh_data_cp();
+        });
+    }
+
+    // Lichess sync callback
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh_data_cp = refresh_data.clone();
+        app.on_sync_lichess(move |username: slint::SharedString| {
+            let username = username.to_string();
+            let username = if username.is_empty() {
+                std::env::var("LICHESS_USERNAME").unwrap_or_else(|_| "hackandtoss".into())
+            } else {
+                username
+            };
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            let refresh_data_cp = refresh_data_cp.clone();
+            std::thread::spawn(move || {
+                // Status: syncing (upgrade happens on event-loop thread)
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_sync_status(slint::SharedString::from("Syncing…"));
+                    }
+                });
+                let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
+                let client = lichess_client::LichessClient::new(&token);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let games = rt.block_on(client.fetch_user_games(&username, 50));
+                let msg = match games {
+                    Ok(games) => {
+                        let mut st = state.lock().unwrap();
+                        let mut new_count = 0u32;
+                        let mut skipped = 0u32;
+                        for g in &games {
+                            if st.db.is_synced("lichess", &g.id) {
+                                continue;
+                            }
+                            let Some(pgn) = g.pgn.clone() else {
+                                skipped += 1;
+                                continue;
+                            };
+                            let date = g.created_at.map(|ms| {
+                                let (y, m, d) = tree::days_to_ymd(ms / 86_400_000);
+                                format!("{:04}-{:02}-{:02}", y, m, d)
+                            });
+                            match ingest_pgn_game(
+                                &mut st.db,
+                                &format!("lichess_{}", g.id),
+                                "lichess",
+                                &pgn,
+                                date,
+                            ) {
+                                Ok(()) => new_count += 1,
+                                Err(e) => {
+                                    eprintln!("sync: failed to ingest lichess game {}: {e}", g.id);
+                                    skipped += 1;
+                                }
+                            }
+                            let _ = st.db.mark_synced("lichess", &g.id, &tree::local_now_str());
+                        }
+                        drop(st);
+                        // refresh_data is Rc (non-Send), invoke on event loop thread
+                        let _ = slint::invoke_from_event_loop(move || {
+                            refresh_data_cp();
+                        });
+                        format!("Lichess: {new_count} new game(s), {skipped} skipped")
+                    }
+                    Err(e) => format!("Sync failed: {}", e),
+                };
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_sync_status(slint::SharedString::from(msg));
+                    }
+                });
+            });
+        });
+    }
+
+    // Chess.com sync
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh_data_cp = refresh_data.clone();
+        app.on_sync_chesscom(move || {
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            let refresh_data_cp = refresh_data_cp.clone();
+            std::thread::spawn(move || {
+                let set_status = |aw: slint::Weak<AppWindow>, msg: String| {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(app) = aw.upgrade() {
+                            app.set_chesscom_sync_status(slint::SharedString::from(msg));
+                        }
+                    });
+                };
+                set_status(app_weak.clone(), "Syncing…".into());
+                let username = std::env::var("CHESSCOM_USERNAME")
+                    .unwrap_or_else(|_| "ElectricMindGames".into());
+                let ua = std::env::var("CHESSCOM_USER_AGENT").unwrap_or_else(|_| {
+                    "grandmaster-forge (contact: johncjohnson1113@gmail.com)".into()
+                });
+                let client = chesscom_client::ChesscomClient::new(&ua);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let msg = (|| -> Result<String, String> {
+                    let archives = rt.block_on(client.fetch_archives(&username))?;
+                    let mut new_count = 0u32;
+                    let mut skipped = 0u32;
+                    // Newest months first; stop after 50 new games to bound first syncs.
+                    'outer: for url in archives.iter().rev() {
+                        let games = rt.block_on(client.fetch_month(url))?;
+                        for g in games.iter().rev() {
+                            let ext_id = chesscom_client::game_external_id(g);
+                            let mut st = state.lock().unwrap();
+                            if st.db.is_synced("chesscom", &ext_id) {
+                                continue;
+                            }
+                            let Some(pgn) = g.pgn.clone() else {
+                                let _ =
+                                    st.db
+                                        .mark_synced("chesscom", &ext_id, &tree::local_now_str());
+                                skipped += 1;
+                                continue;
+                            };
+                            let date = g.end_time.map(|secs| {
+                                let (y, m, d) = tree::days_to_ymd(secs / 86_400);
+                                format!("{:04}-{:02}-{:02}", y, m, d)
+                            });
+                            match ingest_pgn_game(
+                                &mut st.db,
+                                &format!("chesscom_{ext_id}"),
+                                "chesscom",
+                                &pgn,
+                                date,
+                            ) {
+                                Ok(()) => new_count += 1,
+                                Err(e) => {
+                                    eprintln!("sync: failed to ingest chesscom game {ext_id}: {e}");
+                                    skipped += 1;
+                                }
+                            }
+                            let _ = st
+                                .db
+                                .mark_synced("chesscom", &ext_id, &tree::local_now_str());
+                            if new_count >= 50 {
+                                break 'outer;
+                            }
+                        }
+                    }
+                    Ok(format!(
+                        "Chess.com: {new_count} new game(s), {skipped} skipped"
+                    ))
+                })()
+                .unwrap_or_else(|e| format!("Chess.com sync failed: {e}"));
+                let _ = slint::invoke_from_event_loop(move || {
+                    refresh_data_cp();
+                });
+                set_status(app_weak, msg);
+            });
+        });
+    }
+
+    // Build opening tree callback
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_build_opening_tree(move || {
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            std::thread::spawn(move || {
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_tree_status(slint::SharedString::from("Building tree…"));
+                    }
+                });
+                let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
+                let client = lichess_client::LichessClient::new(&token);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(scraper::collect_opening_nodes(&client, 4, 1000));
+                let msg = match result {
+                    Ok(nodes) => {
+                        let count = nodes.len();
+                        let mut st = state.lock().unwrap();
+                        for node in nodes {
+                            let _ = st.db.insert_opening_node(&node);
+                        }
+                        drop(st);
+                        format!("Tree built: {} nodes", count)
+                    }
+                    Err(e) => format!("Tree error: {}", e),
+                };
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_tree_status(slint::SharedString::from(msg));
+                    }
+                });
+            });
+        });
+    }
+
+    // Load puzzle callback
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_load_puzzle(move || {
+            let st = state.lock().unwrap();
+            if let Ok(Some(puzzle)) = st.db.get_next_puzzle(2000) {
+                let fen = puzzle.fen.clone();
+                drop(st);
+                if let Some(app) = app_weak.upgrade() {
+                    let pieces = fen_to_pieces(&fen);
+                    app.set_board_pieces(slint::ModelRc::new(slint::VecModel::from(
+                        pieces
+                            .iter()
+                            .map(|s| slint::SharedString::from(s.as_str()))
+                            .collect::<Vec<_>>(),
+                    )));
+                    app.set_drill_instructions(slint::SharedString::from(format!(
+                        "Puzzle: find the best move ({})",
+                        puzzle.id
+                    )));
+                }
+            } else {
+                drop(st);
+            }
+        });
+    }
+
+    // Opening explorer move selection callback
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_explorer_select_move(move |uci: slint::SharedString| {
+            let st = state.lock().unwrap();
+            let fen = st.current_fen.clone().unwrap_or_else(|| {
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string()
+            });
+            drop(st);
+            use shakmaty::fen::Fen;
+            use shakmaty::uci::Uci;
+            use shakmaty::{CastlingMode, Chess, EnPassantMode, Position};
+            let new_fen = (|| -> Result<String, String> {
+                let parsed: Fen = fen.parse().map_err(|e| format!("{e}"))?;
+                let pos: Chess = parsed
+                    .into_position(CastlingMode::Standard)
+                    .map_err(|e| format!("{e}"))?;
+                let uci_move: Uci = uci.to_string().parse().map_err(|e| format!("{e}"))?;
+                let m = uci_move.to_move(&pos).map_err(|e| format!("{e}"))?;
+                let next = pos.play(&m).map_err(|e| format!("{e}"))?;
+                Ok(Fen::from_position(next, EnPassantMode::Always).to_string())
+            })();
+            if let Ok(new_fen) = new_fen {
+                if let Some(app) = app_weak.upgrade() {
+                    let pieces = fen_to_pieces(&new_fen);
+                    app.set_board_pieces(slint::ModelRc::new(slint::VecModel::from(
+                        pieces
+                            .iter()
+                            .map(|s| slint::SharedString::from(s.as_str()))
+                            .collect::<Vec<_>>(),
+                    )));
+                }
+            }
+        });
+    }
+
+    // ── Repertoire Builder callbacks ─────────────────────────────────────────
+
+    // builder-click-square: two-click move entry on the builder board
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_builder_click_square(move |sq_idx: i32| {
+            let sq = sq_idx as usize;
+            let mut st = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+
+            if let Some(from) = st.builder_selected_sq {
+                // Second click: attempt the move
+                let from_sq = index_to_square(from);
+                let to_sq = index_to_square(sq);
+                let uci = format!("{}{}", from_sq, to_sq);
+                use shakmaty::uci::Uci;
+                use shakmaty::{EnPassantMode, Position};
+                let uci_move: Uci = match uci.parse() {
+                    Ok(u) => u,
+                    Err(_) => {
+                        st.builder_selected_sq = None;
+                        app.set_builder_selected_square(-1);
+                        return;
+                    }
+                };
+                match uci_move.to_move(&st.builder_chess) {
+                    Ok(m) => {
+                        st.builder_chess.play_unchecked(&m);
+                        st.builder_staged_uci.push(uci.clone());
+                        let new_fen = shakmaty::fen::Fen::from_position(
+                            st.builder_chess.clone(),
+                            EnPassantMode::Always,
+                        )
+                        .to_string();
+                        let pieces = fen_to_pieces(&new_fen);
+                        app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(
+                            slint::VecModel::from(pieces),
+                        )));
+                        app.set_builder_fen(slint::SharedString::from(new_fen));
+                        app.set_builder_moves(slint::SharedString::from(
+                            st.builder_staged_uci.join(" "),
+                        ));
+                    }
+                    Err(_) => {}
+                }
+                st.builder_selected_sq = None;
+                app.set_builder_selected_square(-1);
+            } else {
+                // First click: select a piece
+                st.builder_selected_sq = Some(sq);
+                app.set_builder_selected_square(sq_idx);
+            }
+        });
+    }
+
+    // builder-undo: pop last staged move and rebuild position from scratch
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_builder_undo(move || {
+            let mut st = state.lock().unwrap();
+            if st.builder_staged_uci.pop().is_none() {
+                return;
+            }
+            // Rebuild position from start
+            use shakmaty::uci::Uci;
+            use shakmaty::{CastlingMode, Position};
+            let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+            let parsed: shakmaty::fen::Fen = start_fen.parse().unwrap();
+            let mut pos: shakmaty::Chess = parsed.into_position(CastlingMode::Standard).unwrap();
+            for uci_str in &st.builder_staged_uci {
+                if let Ok(uci_move) = uci_str.parse::<Uci>() {
+                    if let Ok(m) = uci_move.to_move(&pos) {
+                        pos.play_unchecked(&m);
+                    }
+                }
+            }
+            st.builder_chess = pos;
+            let new_fen = shakmaty::fen::Fen::from_position(
+                st.builder_chess.clone(),
+                shakmaty::EnPassantMode::Always,
+            )
+            .to_string();
+            let app = app_weak.upgrade().unwrap();
+            let pieces = fen_to_pieces(&new_fen);
+            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                pieces,
+            ))));
+            app.set_builder_fen(slint::SharedString::from(new_fen));
+            app.set_builder_moves(slint::SharedString::from(st.builder_staged_uci.join(" ")));
+            app.set_builder_selected_square(-1);
+            st.builder_selected_sq = None;
+        });
+    }
+
+    // builder-reset: clear staged moves and board
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_builder_reset(move || {
+            let mut st = state.lock().unwrap();
+            st.builder_chess = shakmaty::Chess::default();
+            st.builder_staged_uci.clear();
+            st.builder_selected_sq = None;
+            let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+            let app = app_weak.upgrade().unwrap();
+            let pieces = fen_to_pieces(start_fen);
+            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                pieces,
+            ))));
+            app.set_builder_fen(slint::SharedString::from(start_fen));
+            app.set_builder_moves(slint::SharedString::from(""));
+            app.set_builder_line_name(slint::SharedString::from(""));
+            app.set_builder_selected_square(-1);
+        });
+    }
+
+    // builder-set-color
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_builder_set_color(move |color: slint::SharedString| {
+            let mut st = state.lock().unwrap();
+            st.builder_color = color.to_string();
+            drop(st);
+            let app = app_weak.upgrade().unwrap();
+            app.set_builder_color(color);
+        });
+    }
+
+    // builder-save-line: persist current staged line to DB
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh_data_save = refresh_data.clone();
+        app.on_builder_save_line(move || {
+            let mut st = state.lock().unwrap();
+            if st.builder_staged_uci.is_empty() {
+                return;
+            }
+            let app = app_weak.upgrade().unwrap();
+            let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+            let staged = st.builder_staged_uci.clone();
+            let side = st.builder_color.clone();
+            match tree::import_uci_line(&mut st.db, start_fen, &staged, &side, "manual") {
+                Ok(n) => app.set_drill_instructions(slint::SharedString::from(format!(
+                    "Saved: {n} new move(s) added to your {side} repertoire."
+                ))),
+                Err(e) => app
+                    .set_drill_instructions(slint::SharedString::from(format!("Save failed: {e}"))),
+            }
+            // Reset builder after save
+            st.builder_chess = shakmaty::Chess::default();
+            st.builder_staged_uci.clear();
+            st.builder_selected_sq = None;
+            drop(st);
+            app.set_builder_moves(slint::SharedString::from(""));
+            app.set_builder_line_name(slint::SharedString::from(""));
+            let pieces = fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                pieces,
+            ))));
+            refresh_data_save();
+        });
+    }
+
+    // suggest-pgn-lines: extract opening moves from the most recent imported game
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_suggest_pgn_lines(move || {
+            let st = state.lock().unwrap();
+            let games = st.db.get_games().unwrap_or_default();
+            drop(st);
+            let app = app_weak.upgrade().unwrap();
+            if let Some(game) = games.first() {
+                // Parse PGN, convert first 15 SAN moves to UCI
+                let parsed = pgn_processor::parse_pgn(&game.pgn);
+                use shakmaty::san::San;
+                use shakmaty::{CastlingMode, Position};
+                let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+                let parsed_start: shakmaty::fen::Fen = start_fen.parse().unwrap();
+                let mut suggest_pos: shakmaty::Chess =
+                    parsed_start.into_position(CastlingMode::Standard).unwrap();
+                let mut first_15: Vec<String> = Vec::new();
+                for san_str in parsed.moves.iter().take(15) {
+                    let san_str = san_str.trim_end_matches(['?', '!', '+', '#']);
+                    if let Ok(san) = san_str.parse::<San>() {
+                        if let Ok(m) = san.to_move(&suggest_pos) {
+                            let uci =
+                                shakmaty::uci::Uci::from_move(&m, shakmaty::CastlingMode::Standard);
+                            first_15.push(uci.to_string());
+                            suggest_pos.play_unchecked(&m);
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if !first_15.is_empty() {
+                    app.set_builder_moves(slint::SharedString::from(first_15.join(" ")));
+                    app.set_builder_line_name(slint::SharedString::from(format!(
+                        "{} vs {} (opening)",
+                        game.white, game.black
+                    )));
+                    // Load the suggested moves into builder state
+                    let mut st2 = state.lock().unwrap();
+                    use shakmaty::uci::Uci;
+                    use shakmaty::{CastlingMode, Position};
+                    let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+                    let parsed_fen: shakmaty::fen::Fen = start_fen.parse().unwrap();
+                    let mut pos: shakmaty::Chess =
+                        parsed_fen.into_position(CastlingMode::Standard).unwrap();
+                    let mut valid: Vec<String> = Vec::new();
+                    for uci_str in &first_15 {
+                        if let Ok(uci_move) = uci_str.parse::<Uci>() {
+                            if let Ok(m) = uci_move.to_move(&pos) {
+                                pos.play_unchecked(&m);
+                                valid.push(uci_str.clone());
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    st2.builder_chess = pos.clone();
+                    st2.builder_staged_uci = valid;
+                    drop(st2);
+                    let fen =
+                        shakmaty::fen::Fen::from_position(pos, shakmaty::EnPassantMode::Always)
+                            .to_string();
+                    let pieces = fen_to_pieces(&fen);
+                    app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(
+                        slint::VecModel::from(pieces),
+                    )));
+                    app.set_builder_fen(slint::SharedString::from(fen));
+                }
+            } else {
+                app.set_builder_line_name(slint::SharedString::from("No games imported yet"));
+            }
+        });
+    }
+
+    // Import pasted PGN with variations into the tree
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh = refresh_data.clone();
+        app.on_import_lines(move |pgn: slint::SharedString, side: slint::SharedString| {
+            let app = app_weak.upgrade().unwrap();
+            if pgn.trim().is_empty() {
+                app.set_import_status(slint::SharedString::from("Nothing to import."));
+                return;
+            }
+            let walked = match pgn_processor::walk_pgn_variations(&pgn) {
+                Ok(w) => w,
+                Err(e) => {
+                    app.set_import_status(slint::SharedString::from(format!("Parse error: {e}")));
+                    return;
+                }
+            };
+            let total = walked.len();
+            let mut st = state.lock().unwrap();
+            match tree::import_walked(&mut st.db, &walked, &side, "pgn") {
+                Ok(n) => {
+                    drop(st);
+                    app.set_import_status(slint::SharedString::from(format!(
+                        "Imported {n} new move(s) ({total} parsed) into {side} repertoire."
+                    )));
+                    refresh();
+                }
+                Err(e) => {
+                    app.set_import_status(slint::SharedString::from(format!("Import failed: {e}")))
+                }
+            }
+        });
+    }
+
+    // Sync Lichess studies into the tree
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh = refresh_data.clone();
+        app.on_sync_studies(move |side: slint::SharedString| {
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            let refresh = refresh.clone();
+            let side = side.to_string();
+            std::thread::spawn(move || {
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_import_status(slint::SharedString::from("Fetching studies…"));
+                    }
+                });
+                let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
+                let username =
+                    std::env::var("LICHESS_USERNAME").unwrap_or_else(|_| "hackandtoss".into());
+                let client = lichess_client::LichessClient::new(&token);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let msg = match rt.block_on(client.fetch_studies_pgn(&username)) {
+                    Ok(pgn_text) => match pgn_processor::walk_pgn_variations(&pgn_text) {
+                        Ok(walked) => {
+                            let mut st = state.lock().unwrap();
+                            match tree::import_walked(&mut st.db, &walked, &side, "study") {
+                                Ok(n) => format!("Studies: {n} new move(s) imported."),
+                                Err(e) => format!("Study import failed: {e}"),
+                            }
+                        }
+                        Err(e) => format!("Study parse failed: {e}"),
+                    },
+                    Err(e) => format!("Studies fetch failed: {e}"),
+                };
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_import_status(slint::SharedString::from(msg));
+                    }
+                    refresh();
+                });
+            });
+        });
+    }
+
+    // Adopt master lines from the builder's current position
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh = refresh_data.clone();
+        app.on_adopt_explorer(move |side: slint::SharedString| {
+            let app = app_weak.upgrade().unwrap();
+            let start_fen = app.get_builder_fen().to_string();
+            let side = side.to_string();
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            let refresh = refresh.clone();
+            std::thread::spawn(move || {
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_tree_status(slint::SharedString::from("Adopting master lines…"));
+                    }
+                });
+                let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
+                let client = lichess_client::LichessClient::new(&token);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let (pairs, stop_reason) = rt.block_on(scraper::adopt_explorer_lines(
+                    &client, &start_fen, &side, 8, 3,
+                ));
+                let msg = {
+                    let mut st = state.lock().unwrap();
+                    let mut new_edges = 0u32;
+                    for (parent_fen, uci) in &pairs {
+                        match tree::add_move_edge(&mut st.db, parent_fen, uci, &side, "explorer") {
+                            Ok((_, _, was_new)) => {
+                                if was_new {
+                                    new_edges += 1;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("adopt: failed to insert edge {parent_fen} {uci}: {e}");
+                            }
+                        }
+                    }
+                    match stop_reason {
+                        None => format!("Adopted {new_edges} new move(s) from master games."),
+                        Some(reason) => {
+                            format!("Adopted {new_edges} new move(s) — stopped early: {reason}")
+                        }
+                    }
+                };
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_tree_status(slint::SharedString::from(msg));
+                    }
+                    refresh();
+                });
+            });
+        });
+    }
+
+    // Play-vs-bot: start a new game.
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_play_new_game(move |color: slint::SharedString, elo: i32| {
+            let mut st = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            st.play_chess = Chess::default();
+            st.play_moves_uci.clear();
+            st.play_side = color.to_string();
+            st.play_session = None; // rebuilt lazily with the chosen Elo
+            st.play_deviations.clear();
+            st.play_plies_in_book = 0;
+            st.play_left_book_at = None;
+            app.set_play_elo(elo);
+            app.set_play_active(true);
+            app.set_play_summary(slint::SharedString::from(""));
+            app.set_play_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"),
+            ))));
+            let msg = if st.play_side == "Black" {
+                bot_take_turn(&mut st, &app) // bot is White, moves first
+            } else {
+                "Your move.".to_string()
+            };
+            app.set_play_status(slint::SharedString::from(msg));
+        });
+    }
+
+    // Play-vs-bot: two-click move; validates legality; book-deviation grading; then bot replies.
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_play_click_square(move |idx: i32| {
+            let mut st = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            if !app.get_play_active() {
+                return;
+            }
+            let sel = app.get_play_selected_square();
+            if sel == -1 {
+                app.set_play_selected_square(idx);
+                return;
+            }
+            app.set_play_selected_square(-1);
+            let uci_try = format!(
+                "{}{}",
+                index_to_square(sel as usize),
+                index_to_square(idx as usize)
+            );
+
+            // Legality first (try promotion to queen as fallback).
+            let mv = uci_try
+                .parse::<Uci>()
+                .ok()
+                .and_then(|u| u.to_move(&st.play_chess).ok())
+                .or_else(|| {
+                    format!("{uci_try}q")
+                        .parse::<Uci>()
+                        .ok()
+                        .and_then(|u| u.to_move(&st.play_chess).ok())
+                });
+            let Some(m) = mv else {
+                app.set_play_status(slint::SharedString::from("Illegal move."));
+                return;
+            };
+            let played_uci = Uci::from_move(&m, CastlingMode::Standard).to_string();
+
+            // Book check BEFORE playing: was this position in book, and did we deviate?
+            let key = tree::position_key(&st.play_chess);
+            let side = st.play_side.clone();
+            let my_edges: Vec<_> = st
+                .db
+                .get_repertoire_moves_from(&key, &side)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.is_my_move)
+                .collect();
+            if !my_edges.is_empty() {
+                if my_edges.iter().any(|e| e.uci == played_uci) {
+                    st.play_plies_in_book += 1;
+                } else {
+                    let today_days = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                        / 86400;
+                    let expected: Vec<String> = my_edges.iter().map(|e| e.san.clone()).collect();
+                    for e in &my_edges {
+                        let _ = tree::grade_edge(&mut st.db, e, 1, today_days);
+                    }
+                    let move_no = st.play_moves_uci.len() / 2 + 1;
+                    st.play_deviations.push(format!(
+                        "Move {}: played {played_uci}, book expected {}",
+                        move_no,
+                        expected.join(" / ")
+                    ));
+                    if st.play_left_book_at.is_none() {
+                        st.play_left_book_at = Some(st.play_moves_uci.len() as u32);
+                    }
+                }
+            }
+
+            st.play_chess.play_unchecked(&m);
+            st.play_moves_uci.push(played_uci);
+            let fen = shakmaty::fen::Fen::from_position(
+                st.play_chess.clone(),
+                shakmaty::EnPassantMode::Legal,
+            )
+            .to_string();
+            app.set_play_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                fen_to_pieces(&fen),
+            ))));
+
+            use shakmaty::Position;
+            if st.play_chess.is_game_over() {
+                finish_play_game(&mut st, &app, "Game over");
+                return;
+            }
+            let msg = bot_take_turn(&mut st, &app);
+            let ended = msg.contains("ended") || msg.contains("Engine") || {
+                use shakmaty::Position;
+                st.play_chess.is_game_over()
+            };
+            app.set_play_status(slint::SharedString::from(msg));
+            if ended {
+                finish_play_game(&mut st, &app, "Game over");
+            }
+        });
+    }
+
+    // Play-vs-bot: resign.
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_play_resign(move || {
+            let mut st = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            finish_play_game(&mut st, &app, "Resigned");
+        });
+    }
+
+    // Send the finished bot game through the normal import/analysis pipeline.
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_play_review_game(move || {
+            let st = state.lock().unwrap();
+            let moves = st.play_moves_uci.clone();
+            let side = st.play_side.clone();
+            drop(st);
+            if moves.is_empty() { return; }
+            // Rebuild SAN movetext from UCI.
+            use shakmaty::{Chess, Position};
+            use shakmaty::san::San;
+            let mut pos = Chess::default();
+            let mut san_moves: Vec<String> = Vec::new();
+            for uci_str in &moves {
+                let Ok(uci) = uci_str.parse::<Uci>() else { break };
+                let Ok(m) = uci.to_move(&pos) else { break };
+                san_moves.push(San::from_move(&pos, &m).to_string());
+                pos.play_unchecked(&m);
+            }
+            let mut movetext = String::new();
+            for (i, san) in san_moves.iter().enumerate() {
+                if i % 2 == 0 { movetext.push_str(&format!("{}. ", i / 2 + 1)); }
+                movetext.push_str(san);
+                movetext.push(' ');
+            }
+            let user_name = std::env::var("LICHESS_USERNAME")
+                .or_else(|_| std::env::var("CHESSCOM_USERNAME"))
+                .unwrap_or_else(|_| "You".to_string());
+            let (w, b) = if side == "White" { (user_name.as_str(), "Forge Bot") } else { ("Forge Bot", user_name.as_str()) };
+            let pgn = format!(
+                "[Event \"Bot Game\"]\n[White \"{w}\"]\n[Black \"{b}\"]\n[Date \"{}\"]\n[Round \"{}\"]\n\n{movetext}*",
+                tree::local_now_str().replace('-', "."),
+                uuid_now()
+            );
+            if let Some(app) = app_weak.upgrade() {
+                app.invoke_import_pgn(slint::SharedString::from(pgn));
+                app.set_active_screen(slint::SharedString::from("review"));
+            }
+        });
+    }
+
+    app.run().expect("failed to run Slint application");
+}
+
+// Simple unique id generator helper
+fn uuid_now() -> String {
+    use std::time::SystemTime;
+    let since_the_epoch = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    format!("{:x}", since_the_epoch)
+}
+
+/// Bot plays one move: from the user's book if possible, else via Stockfish PlaySession.
+/// Returns a status string for the UI.
+fn bot_take_turn(state: &mut AppState, app: &AppWindow) -> String {
+    use shakmaty::Position;
+    if state.play_chess.is_game_over() {
+        return "Game over.".to_string();
+    }
+    let key = tree::position_key(&state.play_chess);
+    let edges = state
+        .db
+        .get_repertoire_moves_from(&key, &state.play_side)
+        .unwrap_or_default();
+    let book: Vec<_> = edges.into_iter().filter(|e| !e.is_my_move).collect();
+
+    let uci_str = if !book.is_empty() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as usize;
+        state.play_plies_in_book += 1;
+        app.set_play_book_state(slint::SharedString::from("In book (your prep)"));
+        book[nanos % book.len()].uci.clone()
+    } else {
+        if state.play_left_book_at.is_none() {
+            state.play_left_book_at = Some(state.play_moves_uci.len() as u32);
+        }
+        app.set_play_book_state(slint::SharedString::from("Out of book (Stockfish)"));
+        if state.play_session.is_none() {
+            let elo = app.get_play_elo().max(1320) as u32;
+            match engine_controller::PlaySession::new(
+                &state.stockfish_path,
+                engine_controller::PlayConfig {
+                    elo: Some(elo),
+                    movetime_ms: 400,
+                },
+            ) {
+                Ok(s) => state.play_session = Some(s),
+                Err(e) => {
+                    return format!("Engine unavailable — book-only mode ended the game. ({e})")
+                }
+            }
+        }
+        match state
+            .play_session
+            .as_mut()
+            .unwrap()
+            .best_move_from(&state.play_moves_uci)
+        {
+            Ok(m) => m,
+            Err(e) => return format!("Engine error: {e}"),
+        }
+    };
+
+    let Ok(uci) = uci_str.parse::<Uci>() else {
+        return format!("Bot produced bad move {uci_str} — game ended.");
+    };
+    let Ok(m) = uci.to_move(&state.play_chess) else {
+        // Mock engine can emit illegal moves in arbitrary positions; end gracefully.
+        return format!("Bot move {uci_str} not legal here — game ended.");
+    };
+    state.play_chess.play_unchecked(&m);
+    state.play_moves_uci.push(uci_str.clone());
+    let fen =
+        shakmaty::fen::Fen::from_position(state.play_chess.clone(), shakmaty::EnPassantMode::Legal)
+            .to_string();
+    app.set_play_board_pieces(slint::ModelRc::from(std::rc::Rc::new(
+        slint::VecModel::from(fen_to_pieces(&fen)),
+    )));
+    format!("Bot played {uci_str}. Your move.")
+}
+
+/// End the bot game: build the summary and leave the moves for optional review.
+fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) {
+    app.set_play_active(false);
+    let total = state.play_moves_uci.len();
+    let mut summary = format!(
+        "{reason} after {total} plies. Book moves played: {}.",
+        state.play_plies_in_book
+    );
+    if let Some(ply) = state.play_left_book_at {
+        summary.push_str(&format!(" Left book at ply {}.", ply + 1));
+    }
+    if state.play_deviations.is_empty() {
+        summary.push_str(" No deviations from your repertoire — clean prep!");
+    } else {
+        summary.push_str(&format!(
+            " Deviations (now due for review): {}",
+            state.play_deviations.join(" | ")
+        ));
+    }
+    app.set_play_summary(slint::SharedString::from(summary));
+}
+
+/// Advance the drill: auto-play opponent edges, load expected my-moves, detect session end.
+fn drill_advance(state: &mut AppState, app: &AppWindow) {
+    loop {
+        let key = tree::position_key(&state.drill_chess);
+        let edges = state
+            .db
+            .get_repertoire_moves_from(&key, &state.drill_side)
+            .unwrap_or_default();
+        let (mine, theirs): (Vec<_>, Vec<_>) = edges.into_iter().partition(|e| e.is_my_move);
+
+        let side_to_move_is_mine =
+            (state.drill_chess.turn() == shakmaty::Color::White) == (state.drill_side == "White");
+
+        if side_to_move_is_mine {
+            if mine.is_empty() {
+                app.set_drill_active(false);
+                app.set_drill_instructions(slint::SharedString::from("Line complete — well done!"));
+                return;
+            }
+            app.set_drill_branch_info(slint::SharedString::from(format!(
+                "{} accepted move(s) here",
+                mine.len()
+            )));
+            app.set_drill_instructions(slint::SharedString::from("Your move."));
+            state.drill_expected = mine;
+            return;
+        }
+        // Opponent's turn: auto-play a random opponent edge, or end if none.
+        if theirs.is_empty() {
+            app.set_drill_active(false);
+            app.set_drill_instructions(slint::SharedString::from("Line complete — well done!"));
+            return;
+        }
+        let pick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as usize
+            % theirs.len();
+        let mv = &theirs[pick];
+        if let Ok(uci) = mv.uci.parse::<shakmaty::uci::Uci>() {
+            if let Ok(m) = uci.to_move(&state.drill_chess) {
+                state.drill_chess.play_unchecked(&m);
+                let fen = shakmaty::fen::Fen::from_position(
+                    state.drill_chess.clone(),
+                    shakmaty::EnPassantMode::Legal,
+                )
+                .to_string();
+                app.set_board_pieces(slint::ModelRc::from(std::rc::Rc::new(
+                    slint::VecModel::from(fen_to_pieces(&fen)),
+                )));
+                continue;
+            }
+        }
+        app.set_drill_active(false);
+        return;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fen_to_pieces;
+
+    #[test]
+    fn fen_to_pieces_preserves_piece_side_codes() {
+        let pieces = fen_to_pieces("r7/8/8/8/8/8/P7/K7 w - - 0 1");
+        let as_strings: Vec<String> = pieces.iter().map(|piece| piece.to_string()).collect();
+
+        assert_eq!(as_strings[0], "r");
+        assert_eq!(as_strings[48], "P");
+        assert_eq!(as_strings[56], "K");
+        assert_eq!(as_strings[63], "");
+    }
+}
+
+// Temporary alias to bridge name discrepancy in shakmaty FEN parsing
+mod sk_fen {
+    pub use shakmaty::fen::Fen;
+}

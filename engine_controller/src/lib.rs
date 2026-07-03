@@ -184,6 +184,77 @@ impl Drop for StockfishEngine {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PlayConfig {
+    pub elo: Option<u32>,
+    pub movetime_ms: u32,
+}
+
+impl Default for PlayConfig {
+    fn default() -> Self {
+        Self {
+            elo: None,
+            movetime_ms: 400,
+        }
+    }
+}
+
+/// A persistent engine process for playing full games (one `position … moves` per turn).
+pub struct PlaySession {
+    engine: StockfishEngine,
+    movetime_ms: u32,
+}
+
+impl PlaySession {
+    pub fn new(binary_path: &str, cfg: PlayConfig) -> Result<Self, String> {
+        let mut engine = StockfishEngine::new(binary_path)?;
+        if let Some(elo) = cfg.elo {
+            engine.send_command("setoption name UCI_LimitStrength value true")?;
+            engine.send_command(&format!(
+                "setoption name UCI_Elo value {}",
+                elo.clamp(1320, 3190)
+            ))?;
+            engine.send_command("isready")?;
+            engine.wait_for_line_exact("readyok")?;
+        }
+        Ok(Self {
+            engine,
+            movetime_ms: cfg.movetime_ms,
+        })
+    }
+
+    pub fn best_move_from(&mut self, moves_uci: &[String]) -> Result<String, String> {
+        let pos_cmd = if moves_uci.is_empty() {
+            "position startpos".to_string()
+        } else {
+            format!("position startpos moves {}", moves_uci.join(" "))
+        };
+        self.engine.send_command(&pos_cmd)?;
+        self.engine
+            .send_command(&format!("go movetime {}", self.movetime_ms))?;
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            let read = self
+                .engine
+                .stdout
+                .read_line(&mut buf)
+                .map_err(|e| format!("failed reading engine output: {e}"))?;
+            if read == 0 {
+                return Err("engine exited during play".to_string());
+            }
+            let line = buf.trim();
+            if line == "bestmove" || line.starts_with("bestmove ") {
+                return line
+                    .split_whitespace()
+                    .nth(1)
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| "malformed bestmove".to_string());
+            }
+        }
+    }
+}
+
 pub fn classify_centipawn_loss(loss: i32) -> Option<MistakeClass> {
     if loss >= 250 {
         Some(MistakeClass::Blunder)
@@ -258,5 +329,40 @@ mod tests {
         assert_eq!(parsed.depth, 18);
         assert_eq!(parsed.score, Score::Centipawns(-42));
         assert_eq!(parsed.pv, vec!["e2e4", "e7e5", "g1f3"]);
+    }
+
+    #[test]
+    fn play_session_returns_bestmove_from_mock() {
+        // Build/locate mock-stockfish like app::find_stockfish_path does.
+        let mut path = std::env::current_dir().unwrap();
+        path.pop(); // workspace root from engine_controller/
+        path.push("target");
+        path.push("debug");
+        path.push(if cfg!(windows) {
+            "mock-stockfish.exe"
+        } else {
+            "mock-stockfish"
+        });
+        if !path.exists() {
+            let _ = std::process::Command::new("cargo")
+                .args(["build", "-p", "app", "--bin", "mock-stockfish"])
+                .status();
+        }
+        if !path.exists() {
+            eprintln!("mock-stockfish unavailable; skipping");
+            return;
+        }
+        let mut session = PlaySession::new(
+            path.to_str().unwrap(),
+            PlayConfig {
+                elo: Some(1500),
+                movetime_ms: 50,
+            },
+        )
+        .unwrap();
+        let mv = session
+            .best_move_from(&["e2e4".to_string(), "e7e5".to_string()])
+            .unwrap();
+        assert!(!mv.is_empty());
     }
 }
