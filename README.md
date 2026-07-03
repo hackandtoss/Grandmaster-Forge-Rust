@@ -40,7 +40,7 @@ A Rust desktop chess training platform combining ideas from Lichess, Chess.com, 
 - Play a full game against a bot that follows *your* prepared repertoire while both sides are in book, branching uniformly at random among your stored opponent replies
 - When the position leaves your prep, a Stockfish `PlaySession` takes over at your chosen Elo (clamped to a 1320 floor) — the UI flips between "In book (your prep)" and "Out of book (Stockfish)"
 - Deviating from a known position grades every expected my-move edge as a lapse (SM-2 grade 1) and records the deviation; play continues so you can finish the game
-- Resign or reach game-over to get a summary (plies in book, where you left book, deviations now due for review); "Review This Game" hands the game to Game Review for full engine analysis
+- Resign or reach game-over to get a summary (plies in book, where you left book, deviations due for review — scheduled by SM-2); "Review This Game" hands the game to Game Review for full engine analysis
 
 ### Game Review
 - Import PGN; Stockfish analyses every position in a background thread
@@ -142,14 +142,16 @@ Grandmaster-Forge-Rust/
 | `puzzles` | Puzzle positions with solution and difficulty |
 | `training_events` | Log of every drill/puzzle/review outcome |
 | `game_sync` | Per-source dedup ledger for synced game IDs (Lichess + Chess.com) |
-| `opening_lines` | *Retired* — legacy repertoire lines; migrated into `repertoire_nodes`/`repertoire_moves` on startup, then no longer written |
+| `opening_lines` | *Legacy* — old repertoire lines; migrated into the tree (`repertoire_nodes`/`repertoire_moves`) on first startup, then retained as an empty legacy table (recreated empty each launch) and never written to again |
 
 ---
 
 ## Setup
 
 ```bash
-# Prerequisites: Rust stable, Stockfish in PATH or adjacent binary
+# Prerequisites: Rust stable, and a real Stockfish for the Play-vs-Bot screen.
+# Engine resolution order: STOCKFISH_PATH env var -> `stockfish` on PATH -> bundled mock engine.
+# The mock engine is for development only; Play-vs-Bot needs a real Stockfish.
 
 # Clone and build
 git clone <repo>

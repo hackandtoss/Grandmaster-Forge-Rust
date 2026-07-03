@@ -162,6 +162,9 @@ pub fn migrate_legacy_lines(db: &mut SqliteStore) -> Result<u32, String> {
         return Ok(0);
     }
     let lines = db.get_opening_lines("default_user")?;
+    if lines.is_empty() {
+        return Ok(0); // nothing to migrate; leave the empty table in place
+    }
     let mut migrated = 0u32;
     for line in &lines {
         let mut fen = line.start_fen.clone();
@@ -315,5 +318,29 @@ mod tests {
         let failed = db.get_repertoire_move(id).unwrap().unwrap();
         assert_eq!(failed.srs_reps, 0);
         assert_eq!(failed.srs_due_date, "2026-07-02"); // reset to 1 day
+    }
+
+    #[test]
+    fn migrate_legacy_lines_empty_table_is_noop_and_stays_put() {
+        let mut db = mem_store();
+        // Fresh DB: opening_lines exists but is empty. Migration must be a no-op that
+        // leaves the empty legacy table in place, and must stay a no-op on relaunch.
+        assert!(db.opening_lines_table_exists());
+        assert_eq!(migrate_legacy_lines(&mut db).unwrap(), 0);
+        assert!(db.opening_lines_table_exists());
+        assert_eq!(migrate_legacy_lines(&mut db).unwrap(), 0);
+        assert!(db.opening_lines_table_exists());
+    }
+
+    #[test]
+    fn position_key_matches_pgn_processor_and_drops_phantom_ep() {
+        use shakmaty::{Chess, Position};
+        let mut pos = Chess::default();
+        let m = "e2e4".parse::<shakmaty::uci::Uci>().unwrap().to_move(&pos).unwrap();
+        pos = pos.play(&m).unwrap();
+        let key = position_key(&pos);
+        assert_eq!(key, pgn_processor::position_key(&pos));
+        // EnPassantMode::Legal: no black pawn can capture on e3, so ep field must be '-'
+        assert!(key.split_whitespace().nth(3) == Some("-"));
     }
 }

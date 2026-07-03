@@ -1091,6 +1091,16 @@ fn find_stockfish_path() -> String {
         }
     }
 
+    // Prefer a real stockfish from PATH before falling back to the mock engine
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(if cfg!(windows) { "stockfish.exe" } else { "stockfish" });
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
+
     // Try target/debug/mock-stockfish.exe or mock-stockfish
     let mut path = std::env::current_dir().unwrap_or_default();
     path.push("target");
@@ -1160,7 +1170,6 @@ struct AppState {
     // Tree-based drill session
     drill_side: String,                 // "White" | "Black"
     drill_chess: Chess,                 // current drill position (kept)
-    drill_edge_ids: Vec<i64>,           // my-move edges already graded this session
     drill_expected: Vec<db_manager::RepertoireMoveRecord>, // my-move edges at current node
     drill_start_edge: Option<db_manager::RepertoireMoveRecord>,
     // Current board FEN for explorer
@@ -1203,7 +1212,6 @@ fn main() {
         stockfish_path,
         drill_side: "White".to_string(),
         drill_chess: Chess::default(),
-        drill_edge_ids: Vec::new(),
         drill_expected: Vec::new(),
         drill_start_edge: None,
         current_fen: None,
@@ -1415,7 +1423,7 @@ fn main() {
             let Ok(pos) = parsed.into_position(CastlingMode::Standard) else { return };
             state.drill_side = side.clone();
             state.drill_chess = pos;
-            state.drill_edge_ids.clear();
+            state.drill_expected.clear();
             drill_advance(&mut state, &app); // shared session-step helper, below
             app.set_drill_active(true);
         });
@@ -1444,7 +1452,6 @@ fn main() {
 
             if let Some(edge) = matched {
                 let _ = tree::grade_edge(&mut state.db, &edge, 5, today_days);
-                state.drill_edge_ids.push(edge.id);
                 let event = TrainingEventRecord {
                     id: format!("evt_{}", uuid_now()),
                     user_id: "default_user".to_string(),
@@ -1504,7 +1511,11 @@ fn main() {
             let white = parsed.headers.get("White").cloned().unwrap_or_else(|| "WhitePlayer".to_string());
             let black = parsed.headers.get("Black").cloned().unwrap_or_else(|| "BlackPlayer".to_string());
             let date = parsed.headers.get("Date").cloned().unwrap_or_else(|| "2026-06-12".to_string());
-            let game_id = format!("{}_{}_{}", white, black, date).replace(" ", "_");
+            let round = parsed.headers.get("Round").filter(|r| !r.is_empty() && *r != "?" && *r != "-");
+            let game_id = match round {
+                Some(r) => format!("{}_{}_{}_{}", white, black, date, r).replace(" ", "_"),
+                None => format!("{}_{}_{}", white, black, date).replace(" ", "_"),
+            };
 
             let _ = ingest_pgn_game(&mut state_lock.db, &game_id, "Imported PGN", &pgn_text, Some(date));
 
@@ -2384,10 +2395,14 @@ fn main() {
                 movetext.push_str(san);
                 movetext.push(' ');
             }
-            let (w, b) = if side == "White" { ("You", "Forge Bot") } else { ("Forge Bot", "You") };
+            let user_name = std::env::var("LICHESS_USERNAME")
+                .or_else(|_| std::env::var("CHESSCOM_USERNAME"))
+                .unwrap_or_else(|_| "You".to_string());
+            let (w, b) = if side == "White" { (user_name.as_str(), "Forge Bot") } else { ("Forge Bot", user_name.as_str()) };
             let pgn = format!(
-                "[Event \"Bot Game\"]\n[White \"{w}\"]\n[Black \"{b}\"]\n[Date \"{}\"]\n\n{movetext}*",
-                tree::local_now_str().replace('-', ".")
+                "[Event \"Bot Game\"]\n[White \"{w}\"]\n[Black \"{b}\"]\n[Date \"{}\"]\n[Round \"{}\"]\n\n{movetext}*",
+                tree::local_now_str().replace('-', "."),
+                uuid_now()
             );
             if let Some(app) = app_weak.upgrade() {
                 app.invoke_import_pgn(slint::SharedString::from(pgn));
@@ -2468,7 +2483,7 @@ fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) {
     app.set_play_active(false);
     let total = state.play_moves_uci.len();
     let mut summary = format!(
-        "{reason} after {total} plies. In book: {} of your moves.",
+        "{reason} after {total} plies. Book moves played: {}.",
         state.play_plies_in_book
     );
     if let Some(ply) = state.play_left_book_at {
