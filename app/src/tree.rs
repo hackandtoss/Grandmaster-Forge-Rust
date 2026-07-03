@@ -1,8 +1,8 @@
 use db_manager::SqliteStore;
-use shakmaty::{CastlingMode, Chess, EnPassantMode, Position};
 use shakmaty::fen::Fen;
 use shakmaty::san::San;
 use shakmaty::uci::Uci;
+use shakmaty::{CastlingMode, Chess, EnPassantMode, Position};
 
 /// Normalized FEN used as a repertoire-tree key.
 pub fn position_key(pos: &Chess) -> String {
@@ -42,13 +42,19 @@ pub fn add_move_edge(
     source: &str,
 ) -> Result<(i64, String, bool), String> {
     let pos = parse_position(parent_full_fen)?;
-    let uci: Uci = uci_str.parse().map_err(|e| format!("bad UCI '{uci_str}': {e}"))?;
-    let m = uci.to_move(&pos).map_err(|e| format!("illegal move '{uci_str}': {e}"))?;
+    let uci: Uci = uci_str
+        .parse()
+        .map_err(|e| format!("bad UCI '{uci_str}': {e}"))?;
+    let m = uci
+        .to_move(&pos)
+        .map_err(|e| format!("illegal move '{uci_str}': {e}"))?;
     let san = San::from_move(&pos, &m).to_string();
     let mover_is_white = pos.turn() == shakmaty::Color::White;
     let is_my_move = (side == "White") == mover_is_white;
     let parent_key = position_key(&pos);
-    let next = pos.play(&m).map_err(|e| format!("cannot play '{uci_str}': {e}"))?;
+    let next = pos
+        .play(&m)
+        .map_err(|e| format!("cannot play '{uci_str}': {e}"))?;
     let child_fen = position_key(&next);
 
     let parent_id = db.ensure_repertoire_node(&parent_key, side)?;
@@ -120,15 +126,32 @@ pub fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     loop {
         let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
         let days_in_year = if leap { 366 } else { 365 };
-        if days < days_in_year { break; }
+        if days < days_in_year {
+            break;
+        }
         days -= days_in_year;
         year += 1;
     }
     let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days: [u64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 1u64;
     for md in &month_days {
-        if days < *md { break; }
+        if days < *md {
+            break;
+        }
         days -= *md;
         month += 1;
     }
@@ -150,7 +173,9 @@ pub fn import_walked(
         let child_id = db.ensure_repertoire_node(&w.child_fen, side)?;
         let (_, was_new) =
             db.insert_repertoire_move(parent_id, child_id, &w.uci, &w.san, is_my_move, source)?;
-        if was_new { new_edges += 1; }
+        if was_new {
+            new_edges += 1;
+        }
     }
     Ok(new_edges)
 }
@@ -231,14 +256,26 @@ mod tests {
     #[test]
     fn import_uci_line_walks_and_transposes() {
         let mut db = mem_store();
-        let line: Vec<String> = ["e2e4", "e7e5", "g1f3"].iter().map(|s| s.to_string()).collect();
+        let line: Vec<String> = ["e2e4", "e7e5", "g1f3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let new_edges = import_uci_line(&mut db, START, &line, "White", "pgn").unwrap();
         assert_eq!(new_edges, 3);
         // Re-import is a no-op
-        assert_eq!(import_uci_line(&mut db, START, &line, "White", "pgn").unwrap(), 0);
+        assert_eq!(
+            import_uci_line(&mut db, START, &line, "White", "pgn").unwrap(),
+            0
+        );
         // Transposition: 1.Nf3 e5?? not relevant — instead verify d2d4/d7d5 via two orders
-        let a: Vec<String> = ["d2d4", "d7d5", "c2c4", "e7e6"].iter().map(|s| s.to_string()).collect();
-        let b: Vec<String> = ["c2c4", "e7e6", "d2d4", "d7d5"].iter().map(|s| s.to_string()).collect();
+        let a: Vec<String> = ["d2d4", "d7d5", "c2c4", "e7e6"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let b: Vec<String> = ["c2c4", "e7e6", "d2d4", "d7d5"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let n1 = import_uci_line(&mut db, START, &a, "White", "pgn").unwrap();
         let n2 = import_uci_line(&mut db, START, &b, "White", "pgn").unwrap();
         assert_eq!(n1, 4);
@@ -286,11 +323,17 @@ mod tests {
         let walked = pgn_processor::walk_pgn_variations(pgn).unwrap();
         let n = import_walked(&mut db, &walked, "White", "pgn").unwrap();
         assert_eq!(n, 4);
-        let start_edges = db.get_repertoire_moves_from(
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "White").unwrap();
+        let start_edges = db
+            .get_repertoire_moves_from(
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                "White",
+            )
+            .unwrap();
         assert_eq!(start_edges.len(), 1); // e4, my move
         assert!(start_edges[0].is_my_move);
-        let after_e4 = db.get_repertoire_moves_from(&walked[0].child_fen, "White").unwrap();
+        let after_e4 = db
+            .get_repertoire_moves_from(&walked[0].child_fen, "White")
+            .unwrap();
         assert_eq!(after_e4.len(), 2); // e5 and c5, opponent moves
         assert!(after_e4.iter().all(|e| !e.is_my_move));
     }
@@ -299,8 +342,14 @@ mod tests {
     fn user_side_matches_env_usernames() {
         std::env::set_var("LICHESS_USERNAME", "hackandtoss");
         std::env::set_var("CHESSCOM_USERNAME", "ElectricMindGames");
-        assert_eq!(user_side_for_game("HackAndToss", "opp"), Some("White".to_string()));
-        assert_eq!(user_side_for_game("opp", "electricmindgames"), Some("Black".to_string()));
+        assert_eq!(
+            user_side_for_game("HackAndToss", "opp"),
+            Some("White".to_string())
+        );
+        assert_eq!(
+            user_side_for_game("opp", "electricmindgames"),
+            Some("Black".to_string())
+        );
         assert_eq!(user_side_for_game("a", "b"), None);
     }
 
@@ -336,7 +385,11 @@ mod tests {
     fn position_key_matches_pgn_processor_and_drops_phantom_ep() {
         use shakmaty::{Chess, Position};
         let mut pos = Chess::default();
-        let m = "e2e4".parse::<shakmaty::uci::Uci>().unwrap().to_move(&pos).unwrap();
+        let m = "e2e4"
+            .parse::<shakmaty::uci::Uci>()
+            .unwrap()
+            .to_move(&pos)
+            .unwrap();
         pos = pos.play(&m).unwrap();
         let key = position_key(&pos);
         assert_eq!(key, pgn_processor::position_key(&pos));

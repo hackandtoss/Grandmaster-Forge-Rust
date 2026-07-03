@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use crate::LichessClient;
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ExplorerResponse {

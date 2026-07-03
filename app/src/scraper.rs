@@ -46,11 +46,7 @@ pub async fn collect_opening_nodes(
                 }
             };
 
-            let node_id = format!(
-                "{}_{}",
-                parent_id.as_deref().unwrap_or("root"),
-                mv.uci
-            );
+            let node_id = format!("{}_{}", parent_id.as_deref().unwrap_or("root"), mv.uci);
 
             all_nodes.push(OpeningNode {
                 id: node_id.clone(),
@@ -77,9 +73,9 @@ pub async fn collect_opening_nodes(
 }
 
 fn apply_uci_to_fen(fen: &str, uci: &str) -> Result<String, String> {
-    use shakmaty::{CastlingMode, Chess, EnPassantMode, Position};
     use shakmaty::fen::Fen;
     use shakmaty::uci::Uci;
+    use shakmaty::{CastlingMode, Chess, EnPassantMode, Position};
 
     let parsed_fen: Fen = fen.parse().map_err(|e| format!("bad fen: {e}"))?;
     let pos: Chess = parsed_fen
@@ -103,7 +99,11 @@ pub fn select_adoption_moves(
     let mut sorted: Vec<&lichess_client::explorer::ExplorerMove> = moves.iter().collect();
     sorted.sort_by_key(|m| std::cmp::Reverse(m.white + m.draws + m.black));
     let take = if is_my_turn { 1 } else { top_n };
-    sorted.into_iter().take(take).map(|m| m.uci.clone()).collect()
+    sorted
+        .into_iter()
+        .take(take)
+        .map(|m| m.uci.clone())
+        .collect()
 }
 
 /// Walk the masters explorer from start_fen, returning (parent_fen, uci) pairs to adopt.
@@ -127,7 +127,9 @@ pub async fn adopt_explorer_lines(
     let mut frontier: Vec<(String, u32)> = vec![(start_fen.to_string(), depth)];
     let mut stop_reason: Option<String> = None;
     while let Some((fen, remaining)) = frontier.pop() {
-        if remaining == 0 { continue; }
+        if remaining == 0 {
+            continue;
+        }
         let resp = match client.explorer_masters(&fen).await {
             Ok(r) => r,
             Err(e) => {
@@ -135,18 +137,33 @@ pub async fn adopt_explorer_lines(
                 break;
             }
         };
-        if resp.moves.is_empty() { continue; }
-        let parsed: shakmaty::fen::Fen = match fen.parse() { Ok(f) => f, Err(_) => continue };
+        if resp.moves.is_empty() {
+            continue;
+        }
+        let parsed: shakmaty::fen::Fen = match fen.parse() {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
         let pos: shakmaty::Chess = match parsed.into_position(CastlingMode::Standard) {
             Ok(p) => p,
             Err(_) => continue,
         };
         let is_my_turn = (pos.turn() == shakmaty::Color::White) == (my_side == "White");
         for uci_str in select_adoption_moves(&resp.moves, is_my_turn, top_n) {
-            let uci: shakmaty::uci::Uci = match uci_str.parse() { Ok(u) => u, Err(_) => continue };
-            let m = match uci.to_move(&pos) { Ok(m) => m, Err(_) => continue };
-            let next = match pos.clone().play(&m) { Ok(p) => p, Err(_) => continue };
-            let next_fen = shakmaty::fen::Fen::from_position(next, shakmaty::EnPassantMode::Legal).to_string();
+            let uci: shakmaty::uci::Uci = match uci_str.parse() {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let m = match uci.to_move(&pos) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let next = match pos.clone().play(&m) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let next_fen =
+                shakmaty::fen::Fen::from_position(next, shakmaty::EnPassantMode::Legal).to_string();
             out.push((fen.clone(), uci_str));
             frontier.push((next_fen, remaining - 1));
         }
@@ -162,11 +179,18 @@ mod tests {
     fn adoption_selection_respects_turn() {
         use lichess_client::explorer::ExplorerMove;
         let mk = |uci: &str, games: i64| ExplorerMove {
-            uci: uci.into(), san: uci.into(),
-            white: games, draws: 0, black: 0, average_rating: None,
+            uci: uci.into(),
+            san: uci.into(),
+            white: games,
+            draws: 0,
+            black: 0,
+            average_rating: None,
         };
         let moves = vec![mk("e2e4", 100), mk("d2d4", 300), mk("c2c4", 50)];
         assert_eq!(select_adoption_moves(&moves, true, 3), vec!["d2d4"]);
-        assert_eq!(select_adoption_moves(&moves, false, 2), vec!["d2d4", "e2e4"]);
+        assert_eq!(
+            select_adoption_moves(&moves, false, 2),
+            vec!["d2d4", "e2e4"]
+        );
     }
 }

@@ -192,7 +192,10 @@ pub struct PlayConfig {
 
 impl Default for PlayConfig {
     fn default() -> Self {
-        Self { elo: None, movetime_ms: 400 }
+        Self {
+            elo: None,
+            movetime_ms: 400,
+        }
     }
 }
 
@@ -207,11 +210,17 @@ impl PlaySession {
         let mut engine = StockfishEngine::new(binary_path)?;
         if let Some(elo) = cfg.elo {
             engine.send_command("setoption name UCI_LimitStrength value true")?;
-            engine.send_command(&format!("setoption name UCI_Elo value {}", elo.clamp(1320, 3190)))?;
+            engine.send_command(&format!(
+                "setoption name UCI_Elo value {}",
+                elo.clamp(1320, 3190)
+            ))?;
             engine.send_command("isready")?;
             engine.wait_for_line_exact("readyok")?;
         }
-        Ok(Self { engine, movetime_ms: cfg.movetime_ms })
+        Ok(Self {
+            engine,
+            movetime_ms: cfg.movetime_ms,
+        })
     }
 
     pub fn best_move_from(&mut self, moves_uci: &[String]) -> Result<String, String> {
@@ -221,7 +230,8 @@ impl PlaySession {
             format!("position startpos moves {}", moves_uci.join(" "))
         };
         self.engine.send_command(&pos_cmd)?;
-        self.engine.send_command(&format!("go movetime {}", self.movetime_ms))?;
+        self.engine
+            .send_command(&format!("go movetime {}", self.movetime_ms))?;
         let mut buf = String::new();
         loop {
             buf.clear();
@@ -328,7 +338,11 @@ mod tests {
         path.pop(); // workspace root from engine_controller/
         path.push("target");
         path.push("debug");
-        path.push(if cfg!(windows) { "mock-stockfish.exe" } else { "mock-stockfish" });
+        path.push(if cfg!(windows) {
+            "mock-stockfish.exe"
+        } else {
+            "mock-stockfish"
+        });
         if !path.exists() {
             let _ = std::process::Command::new("cargo")
                 .args(["build", "-p", "app", "--bin", "mock-stockfish"])
@@ -340,7 +354,10 @@ mod tests {
         }
         let mut session = PlaySession::new(
             path.to_str().unwrap(),
-            PlayConfig { elo: Some(1500), movetime_ms: 50 },
+            PlayConfig {
+                elo: Some(1500),
+                movetime_ms: 50,
+            },
         )
         .unwrap();
         let mv = session

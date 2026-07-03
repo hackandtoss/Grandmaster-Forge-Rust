@@ -44,7 +44,11 @@ pub fn game_external_id(g: &ChesscomGame) -> String {
             }
         }
     }
-    format!("anon_{}_{}", g.end_time.unwrap_or(0), g.pgn.as_deref().map(|p| p.len()).unwrap_or(0))
+    format!(
+        "anon_{}_{}",
+        g.end_time.unwrap_or(0),
+        g.pgn.as_deref().map(|p| p.len()).unwrap_or(0)
+    )
 }
 
 impl ChesscomClient {

@@ -16,9 +16,7 @@ pub fn build_weakness_report(
 ) -> WeaknessReport {
     let mut blunder_plies: Vec<u32> = positions
         .iter()
-        .filter(|(_, _, class, _)| {
-            matches!(class.as_deref(), Some("Blunder") | Some("Mistake"))
-        })
+        .filter(|(_, _, class, _)| matches!(class.as_deref(), Some("Blunder") | Some("Mistake")))
         .map(|(ply, _, _, _)| *ply)
         .collect();
     blunder_plies.dedup();
@@ -42,7 +40,10 @@ pub fn build_weakness_report(
     let endgame_needs_work = endgame_accuracy < 70.0;
 
     let top_training_priority = if !blunder_plies.is_empty() {
-        format!("Recurring mistakes around move {}", blunder_plies[0] / 2 + 1)
+        format!(
+            "Recurring mistakes around move {}",
+            blunder_plies[0] / 2 + 1
+        )
     } else if endgame_needs_work {
         "Endgame technique needs improvement".to_string()
     } else if let Some(eco) = &worst_opening_eco {
@@ -66,8 +67,18 @@ mod tests {
     #[test]
     fn detects_blunder_cluster() {
         let positions = vec![
-            (10, Some(300), Some("Blunder".to_string()), Some("B01".to_string())),
-            (10, Some(150), Some("Mistake".to_string()), Some("B01".to_string())),
+            (
+                10,
+                Some(300),
+                Some("Blunder".to_string()),
+                Some("B01".to_string()),
+            ),
+            (
+                10,
+                Some(150),
+                Some("Mistake".to_string()),
+                Some("B01".to_string()),
+            ),
             (20, Some(10), None, Some("B01".to_string())),
         ];
         let report = build_weakness_report(&positions, 85.0);

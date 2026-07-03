@@ -219,39 +219,43 @@ impl SqliteStore {
     }
 
     pub fn insert_game(&mut self, game: &GameRecord) -> Result<(), String> {
-        self.conn.execute(
-            "INSERT INTO games (id, source, white, black, result, eco, pgn, played_at)
+        self.conn
+            .execute(
+                "INSERT INTO games (id, source, white, black, result, eco, pgn, played_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO NOTHING",
-            rusqlite::params![
-                game.id,
-                game.source,
-                game.white,
-                game.black,
-                game.result,
-                game.eco,
-                game.pgn,
-                game.played_at
-            ],
-        ).map_err(|e| e.to_string())?;
+                rusqlite::params![
+                    game.id,
+                    game.source,
+                    game.white,
+                    game.black,
+                    game.result,
+                    game.eco,
+                    game.pgn,
+                    game.played_at
+                ],
+            )
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn get_games(&self) -> Result<Vec<GameRecord>, String> {
         let mut stmt = self.conn.prepare("SELECT id, source, white, black, result, eco, pgn, played_at FROM games ORDER BY played_at DESC")
             .map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([], |row| {
-            Ok(GameRecord {
-                id: row.get(0)?,
-                source: row.get(1)?,
-                white: row.get(2)?,
-                black: row.get(3)?,
-                result: row.get(4)?,
-                eco: row.get(5)?,
-                pgn: row.get(6)?,
-                played_at: row.get(7)?,
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(GameRecord {
+                    id: row.get(0)?,
+                    source: row.get(1)?,
+                    white: row.get(2)?,
+                    black: row.get(3)?,
+                    result: row.get(4)?,
+                    eco: row.get(5)?,
+                    pgn: row.get(6)?,
+                    played_at: row.get(7)?,
+                })
             })
-        }).map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
         let mut games = Vec::new();
         for r in rows {
             games.push(r.map_err(|e| e.to_string())?);
@@ -262,17 +266,19 @@ impl SqliteStore {
     pub fn get_positions_for_game(&self, game_id: &str) -> Result<Vec<PositionRecord>, String> {
         let mut stmt = self.conn.prepare("SELECT id, game_id, ply, fen, played_move, centipawn_loss, mistake_class FROM positions WHERE game_id = ?1 ORDER BY ply ASC")
             .map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([game_id], |row| {
-            Ok(PositionRecord {
-                id: row.get(0)?,
-                game_id: row.get(1)?,
-                ply: row.get(2)?,
-                fen: row.get(3)?,
-                played_move: row.get(4)?,
-                centipawn_loss: row.get(5)?,
-                mistake_class: row.get(6)?,
+        let rows = stmt
+            .query_map([game_id], |row| {
+                Ok(PositionRecord {
+                    id: row.get(0)?,
+                    game_id: row.get(1)?,
+                    ply: row.get(2)?,
+                    fen: row.get(3)?,
+                    played_move: row.get(4)?,
+                    centipawn_loss: row.get(5)?,
+                    mistake_class: row.get(6)?,
+                })
             })
-        }).map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
         let mut positions = Vec::new();
         for r in rows {
             positions.push(r.map_err(|e| e.to_string())?);
@@ -281,30 +287,37 @@ impl SqliteStore {
     }
 
     pub fn get_opening_lines(&self, user_id: &str) -> Result<Vec<OpeningLineRecord>, String> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, user_id, opening_name, start_fen, line_uci, source, confidence,
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, user_id, opening_name, start_fen, line_uci, source, confidence,
                     COALESCE(srs_interval, 1.0), COALESCE(srs_ease, 2.5),
                     COALESCE(srs_reps, 0), COALESCE(srs_due_date, ''),
                     COALESCE(side, 'White')
              FROM opening_lines WHERE user_id = ?1",
-        ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([user_id], |row| {
-            let line_uci_str: String = row.get(4)?;
-            Ok(OpeningLineRecord {
-                id: row.get(0)?,
-                user_id: row.get(1)?,
-                opening_name: row.get(2)?,
-                start_fen: row.get(3)?,
-                line_uci: parse_line_uci(&line_uci_str),
-                source: row.get(5)?,
-                confidence: row.get(6)?,
-                srs_interval: row.get::<_, f64>(7).unwrap_or(1.0) as f32,
-                srs_ease: row.get::<_, f64>(8).unwrap_or(2.5) as f32,
-                srs_reps: row.get::<_, u32>(9).unwrap_or(0),
-                srs_due_date: row.get::<_, String>(10).unwrap_or_default(),
-                side: row.get::<_, String>(11).unwrap_or_else(|_| "White".to_string()),
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([user_id], |row| {
+                let line_uci_str: String = row.get(4)?;
+                Ok(OpeningLineRecord {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    opening_name: row.get(2)?,
+                    start_fen: row.get(3)?,
+                    line_uci: parse_line_uci(&line_uci_str),
+                    source: row.get(5)?,
+                    confidence: row.get(6)?,
+                    srs_interval: row.get::<_, f64>(7).unwrap_or(1.0) as f32,
+                    srs_ease: row.get::<_, f64>(8).unwrap_or(2.5) as f32,
+                    srs_reps: row.get::<_, u32>(9).unwrap_or(0),
+                    srs_due_date: row.get::<_, String>(10).unwrap_or_default(),
+                    side: row
+                        .get::<_, String>(11)
+                        .unwrap_or_else(|_| "White".to_string()),
+                })
             })
-        }).map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
         let mut lines = Vec::new();
         for r in rows {
             lines.push(r.map_err(|e| e.to_string())?);
@@ -312,35 +325,50 @@ impl SqliteStore {
         Ok(lines)
     }
 
-    pub fn get_lines_from_position(&self, start_fen: &str, user_id: &str) -> Result<Vec<OpeningLineRecord>, String> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, user_id, opening_name, start_fen, line_uci, source, confidence,
+    pub fn get_lines_from_position(
+        &self,
+        start_fen: &str,
+        user_id: &str,
+    ) -> Result<Vec<OpeningLineRecord>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, user_id, opening_name, start_fen, line_uci, source, confidence,
                     COALESCE(srs_interval, 1.0), COALESCE(srs_ease, 2.5),
                     COALESCE(srs_reps, 0), COALESCE(srs_due_date, ''),
                     COALESCE(side, 'White')
              FROM opening_lines WHERE start_fen = ?1 AND user_id = ?2",
-        ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(rusqlite::params![start_fen, user_id], |row| {
-            let line_uci_str: String = row.get(4)?;
-            Ok(OpeningLineRecord {
-                id: row.get(0)?,
-                user_id: row.get(1)?,
-                opening_name: row.get(2)?,
-                start_fen: row.get(3)?,
-                line_uci: parse_line_uci(&line_uci_str),
-                source: row.get(5)?,
-                confidence: row.get(6)?,
-                srs_interval: row.get::<_, f64>(7).unwrap_or(1.0) as f32,
-                srs_ease: row.get::<_, f64>(8).unwrap_or(2.5) as f32,
-                srs_reps: row.get::<_, u32>(9).unwrap_or(0),
-                srs_due_date: row.get::<_, String>(10).unwrap_or_default(),
-                side: row.get::<_, String>(11).unwrap_or_else(|_| "White".to_string()),
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![start_fen, user_id], |row| {
+                let line_uci_str: String = row.get(4)?;
+                Ok(OpeningLineRecord {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    opening_name: row.get(2)?,
+                    start_fen: row.get(3)?,
+                    line_uci: parse_line_uci(&line_uci_str),
+                    source: row.get(5)?,
+                    confidence: row.get(6)?,
+                    srs_interval: row.get::<_, f64>(7).unwrap_or(1.0) as f32,
+                    srs_ease: row.get::<_, f64>(8).unwrap_or(2.5) as f32,
+                    srs_reps: row.get::<_, u32>(9).unwrap_or(0),
+                    srs_due_date: row.get::<_, String>(10).unwrap_or_default(),
+                    side: row
+                        .get::<_, String>(11)
+                        .unwrap_or_else(|_| "White".to_string()),
+                })
             })
-        }).map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    pub fn get_due_opening_lines(&self, user_id: &str, today: &str) -> Result<Vec<OpeningLineRecord>, String> {
+    pub fn get_due_opening_lines(
+        &self,
+        user_id: &str,
+        today: &str,
+    ) -> Result<Vec<OpeningLineRecord>, String> {
         let mut stmt = self.conn.prepare(
             "SELECT id, user_id, opening_name, start_fen, line_uci, source, confidence,
                     COALESCE(srs_interval, 1.0), COALESCE(srs_ease, 2.5),
@@ -350,23 +378,27 @@ impl SqliteStore {
              WHERE user_id = ?1 AND (srs_due_date IS NULL OR srs_due_date = '' OR srs_due_date <= ?2)
              ORDER BY srs_due_date ASC",
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(rusqlite::params![user_id, today], |row| {
-            let line_uci_str: String = row.get(4)?;
-            Ok(OpeningLineRecord {
-                id: row.get(0)?,
-                user_id: row.get(1)?,
-                opening_name: row.get(2)?,
-                start_fen: row.get(3)?,
-                line_uci: parse_line_uci(&line_uci_str),
-                source: row.get(5)?,
-                confidence: row.get(6)?,
-                srs_interval: row.get::<_, f64>(7).unwrap_or(1.0) as f32,
-                srs_ease: row.get::<_, f64>(8).unwrap_or(2.5) as f32,
-                srs_reps: row.get::<_, u32>(9).unwrap_or(0),
-                srs_due_date: row.get::<_, String>(10).unwrap_or_default(),
-                side: row.get::<_, String>(11).unwrap_or_else(|_| "White".to_string()),
+        let rows = stmt
+            .query_map(rusqlite::params![user_id, today], |row| {
+                let line_uci_str: String = row.get(4)?;
+                Ok(OpeningLineRecord {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    opening_name: row.get(2)?,
+                    start_fen: row.get(3)?,
+                    line_uci: parse_line_uci(&line_uci_str),
+                    source: row.get(5)?,
+                    confidence: row.get(6)?,
+                    srs_interval: row.get::<_, f64>(7).unwrap_or(1.0) as f32,
+                    srs_ease: row.get::<_, f64>(8).unwrap_or(2.5) as f32,
+                    srs_reps: row.get::<_, u32>(9).unwrap_or(0),
+                    srs_due_date: row.get::<_, String>(10).unwrap_or_default(),
+                    side: row
+                        .get::<_, String>(11)
+                        .unwrap_or_else(|_| "White".to_string()),
+                })
             })
-        }).map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
         let mut lines = Vec::new();
         for r in rows {
             lines.push(r.map_err(|e| e.to_string())?);
@@ -393,29 +425,38 @@ impl SqliteStore {
     }
 
     pub fn get_unreviewed_games_count(&self) -> Result<u32, String> {
-        let count: u32 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT game_id) FROM positions WHERE centipawn_loss IS NULL",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let count: u32 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(DISTINCT game_id) FROM positions WHERE centipawn_loss IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         Ok(count)
     }
 
     pub fn get_blunder_hotspots_count(&self) -> Result<u32, String> {
-        let count: u32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM positions WHERE mistake_class IN ('Mistake', 'Blunder')",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let count: u32 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM positions WHERE mistake_class IN ('Mistake', 'Blunder')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         Ok(count)
     }
 
     pub fn get_opening_due_count(&self, user_id: &str) -> Result<u32, String> {
-        let count: u32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM opening_lines WHERE user_id = ?1 AND confidence < 0.8",
-            rusqlite::params![user_id],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let count: u32 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM opening_lines WHERE user_id = ?1 AND confidence < 0.8",
+                rusqlite::params![user_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         Ok(count)
     }
 
@@ -484,9 +525,17 @@ impl SqliteStore {
                   master_games, white_wins, draws, black_wins)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
-                    node.id, node.parent_id, node.move_uci, node.move_san, node.fen,
-                    node.eco, node.opening_name, node.master_games, node.white_wins,
-                    node.draws, node.black_wins
+                    node.id,
+                    node.parent_id,
+                    node.move_uci,
+                    node.move_san,
+                    node.fen,
+                    node.eco,
+                    node.opening_name,
+                    node.master_games,
+                    node.white_wins,
+                    node.draws,
+                    node.black_wins
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -514,16 +563,23 @@ impl SqliteStore {
                    master_games, white_wins, draws, black_wins";
 
         let nodes = if let Some(pid) = parent_id {
-            let mut stmt = self.conn.prepare(&format!(
+            let mut stmt = self
+                .conn
+                .prepare(&format!(
                 "SELECT {col} FROM opening_tree WHERE parent_id = ?1 ORDER BY master_games DESC"
-            )).map_err(|e| e.to_string())?;
-            let rows = stmt.query_map(rusqlite::params![pid], map_row)
+            ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params![pid], map_row)
                 .map_err(|e| e.to_string())?;
             rows.filter_map(|r| r.ok()).collect()
         } else {
-            let mut stmt = self.conn.prepare(&format!(
+            let mut stmt = self
+                .conn
+                .prepare(&format!(
                 "SELECT {col} FROM opening_tree WHERE parent_id IS NULL ORDER BY master_games DESC"
-            )).map_err(|e| e.to_string())?;
+            ))
+                .map_err(|e| e.to_string())?;
             let rows = stmt.query_map([], map_row).map_err(|e| e.to_string())?;
             rows.filter_map(|r| r.ok()).collect()
         };
@@ -549,14 +605,20 @@ impl SqliteStore {
         }
 
         // Move lichess_sync rows into the per-source game_sync ledger, then drop it.
-        let has_old: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lichess_sync'",
-            [], |row| row.get(0),
-        ).unwrap_or(0);
+        let has_old: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lichess_sync'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         if has_old > 0 {
             let _ = self.conn.execute(
                 "INSERT OR IGNORE INTO game_sync (source, external_id, synced_at)
-                 SELECT 'lichess', game_id, synced_at FROM lichess_sync", []);
+                 SELECT 'lichess', game_id, synced_at FROM lichess_sync",
+                [],
+            );
             let _ = self.conn.execute("DROP TABLE lichess_sync", []);
         }
 
@@ -564,16 +626,23 @@ impl SqliteStore {
     }
 
     pub fn opening_lines_table_exists(&self) -> bool {
-        self.conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='opening_lines'",
-            [], |row| row.get::<_, i64>(0),
-        ).unwrap_or(0) > 0
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='opening_lines'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0
     }
 
     pub fn retire_opening_lines(&mut self) -> Result<(), String> {
         if self.opening_lines_table_exists() {
             self.conn
-                .execute("ALTER TABLE opening_lines RENAME TO opening_lines_legacy", [])
+                .execute(
+                    "ALTER TABLE opening_lines RENAME TO opening_lines_legacy",
+                    [],
+                )
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -581,7 +650,9 @@ impl SqliteStore {
 
     pub fn repertoire_move_count(&self) -> Result<u32, String> {
         self.conn
-            .query_row("SELECT COUNT(*) FROM repertoire_moves", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM repertoire_moves", [], |row| {
+                row.get(0)
+            })
             .map_err(|e| e.to_string())
     }
 
@@ -675,7 +746,10 @@ impl SqliteStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    pub fn get_due_repertoire_moves(&self, today: &str) -> Result<Vec<RepertoireMoveRecord>, String> {
+    pub fn get_due_repertoire_moves(
+        &self,
+        today: &str,
+    ) -> Result<Vec<RepertoireMoveRecord>, String> {
         let mut stmt = self
             .conn
             .prepare(&format!(
@@ -724,7 +798,10 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub fn get_repertoire_move(&self, move_id: i64) -> Result<Option<RepertoireMoveRecord>, String> {
+    pub fn get_repertoire_move(
+        &self,
+        move_id: i64,
+    ) -> Result<Option<RepertoireMoveRecord>, String> {
         let mut stmt = self
             .conn
             .prepare(&format!(
@@ -767,7 +844,12 @@ impl SqliteStore {
             .is_ok()
     }
 
-    pub fn mark_synced(&mut self, source: &str, external_id: &str, synced_at: &str) -> Result<(), String> {
+    pub fn mark_synced(
+        &mut self,
+        source: &str,
+        external_id: &str,
+        synced_at: &str,
+    ) -> Result<(), String> {
         self.conn
             .execute(
                 "INSERT OR IGNORE INTO game_sync (source, external_id, synced_at) VALUES (?1, ?2, ?3)",
@@ -976,7 +1058,10 @@ mod tests {
         };
         store.insert_puzzle(&puzzle).unwrap();
 
-        let fetched = store.get_next_puzzle(1600).unwrap().expect("should have puzzle");
+        let fetched = store
+            .get_next_puzzle(1600)
+            .unwrap()
+            .expect("should have puzzle");
         assert_eq!(fetched.id, "puzzle1");
         assert!(store.get_next_puzzle(1000).unwrap().is_none());
     }
@@ -1063,7 +1148,10 @@ mod tests {
         assert!(moves[0].is_my_move);
         assert_eq!(moves[0].parent_fen, start);
         assert_eq!(moves[0].srs_due_date, "");
-        assert!(store.get_repertoire_moves_from(after_e4, "White").unwrap().is_empty());
+        assert!(store
+            .get_repertoire_moves_from(after_e4, "White")
+            .unwrap()
+            .is_empty());
 
         // node side + fen round-trips; missing id yields None
         assert_eq!(
@@ -1077,26 +1165,47 @@ mod tests {
     fn due_moves_and_srs_update() {
         let mut store = SqliteStore::new_in_memory().unwrap();
         store.bootstrap().unwrap();
-        let a = store.ensure_repertoire_node("fenA w KQkq - 0 1", "White").unwrap();
-        let b = store.ensure_repertoire_node("fenB b KQkq - 0 1", "White").unwrap();
-        let c = store.ensure_repertoire_node("fenC w KQkq - 0 1", "White").unwrap();
-        let (mine, _) = store.insert_repertoire_move(a, b, "e2e4", "e4", true, "manual").unwrap();
-        let (_theirs, _) = store.insert_repertoire_move(b, c, "e7e5", "e5", false, "manual").unwrap();
+        let a = store
+            .ensure_repertoire_node("fenA w KQkq - 0 1", "White")
+            .unwrap();
+        let b = store
+            .ensure_repertoire_node("fenB b KQkq - 0 1", "White")
+            .unwrap();
+        let c = store
+            .ensure_repertoire_node("fenC w KQkq - 0 1", "White")
+            .unwrap();
+        let (mine, _) = store
+            .insert_repertoire_move(a, b, "e2e4", "e4", true, "manual")
+            .unwrap();
+        let (_theirs, _) = store
+            .insert_repertoire_move(b, c, "e7e5", "e5", false, "manual")
+            .unwrap();
 
         // '' due date counts as due; opponent edges never appear
         let due = store.get_due_repertoire_moves("2026-07-01").unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, mine);
-        assert_eq!(store.get_due_repertoire_move_count("2026-07-01").unwrap(), 1);
+        assert_eq!(
+            store.get_due_repertoire_move_count("2026-07-01").unwrap(),
+            1
+        );
 
-        store.update_repertoire_move_srs(mine, 6.0, 2.6, 2, "2026-07-10").unwrap();
-        assert!(store.get_due_repertoire_moves("2026-07-01").unwrap().is_empty());
+        store
+            .update_repertoire_move_srs(mine, 6.0, 2.6, 2, "2026-07-10")
+            .unwrap();
+        assert!(store
+            .get_due_repertoire_moves("2026-07-01")
+            .unwrap()
+            .is_empty());
         let rec = store.get_repertoire_move(mine).unwrap().unwrap();
         assert!((rec.srs_interval - 6.0).abs() < 0.01);
         assert_eq!(rec.srs_reps, 2);
         assert_eq!(rec.srs_due_date, "2026-07-10");
         // due again on its due date
-        assert_eq!(store.get_due_repertoire_moves("2026-07-10").unwrap().len(), 1);
+        assert_eq!(
+            store.get_due_repertoire_moves("2026-07-10").unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -1115,21 +1224,32 @@ mod tests {
         let mut store = SqliteStore::new_in_memory().unwrap();
         store.bootstrap().unwrap();
         // Simulate a database created by an older binary with lichess_sync table
-        store.conn.execute(
-            "CREATE TABLE lichess_sync (game_id TEXT PRIMARY KEY, synced_at TEXT NOT NULL)",
-            [],
-        ).unwrap();
-        store.conn.execute(
-            "INSERT INTO lichess_sync (game_id, synced_at) VALUES ('oldgame', '2026-06-01')",
-            [],
-        ).unwrap();
+        store
+            .conn
+            .execute(
+                "CREATE TABLE lichess_sync (game_id TEXT PRIMARY KEY, synced_at TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO lichess_sync (game_id, synced_at) VALUES ('oldgame', '2026-06-01')",
+                [],
+            )
+            .unwrap();
         store.run_migrations().unwrap();
         assert!(store.is_synced("lichess", "oldgame"));
         // lichess_sync table is gone
-        let gone: bool = store.conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lichess_sync'",
-            [], |row| row.get::<_, i64>(0),
-        ).unwrap() == 0;
+        let gone: bool = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lichess_sync'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 0;
         assert!(gone);
         store.run_migrations().unwrap(); // idempotent
     }

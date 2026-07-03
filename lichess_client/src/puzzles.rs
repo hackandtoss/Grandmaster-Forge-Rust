@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use crate::LichessClient;
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct LichessPuzzle {
@@ -37,10 +37,7 @@ impl LichessClient {
             return Err(format!("Lichess API error: {}", resp.status()));
         }
 
-        let puzzle: LichessPuzzle = resp
-            .json()
-            .await
-            .map_err(|e| format!("parse error: {e}"))?;
+        let puzzle: LichessPuzzle = resp.json().await.map_err(|e| format!("parse error: {e}"))?;
         Ok(puzzle)
     }
 }

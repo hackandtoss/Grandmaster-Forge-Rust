@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use crate::LichessClient;
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct LichessGame {
@@ -98,6 +98,9 @@ mod tests {
         let json = r#"{"id":"abc123","rated":true,"speed":"rapid","pgn":"1. e4 e5","players":{"white":{"user":{"name":"hackandtoss"},"rating":1500},"black":{"user":{"name":"opponent"},"rating":1480}}}"#;
         let game: LichessGame = serde_json::from_str(json).expect("should parse");
         assert_eq!(game.id, "abc123");
-        assert_eq!(game.players.white.user.as_ref().unwrap().name, "hackandtoss");
+        assert_eq!(
+            game.players.white.user.as_ref().unwrap().name,
+            "hackandtoss"
+        );
     }
 }

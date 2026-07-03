@@ -1,13 +1,13 @@
-mod srs;
 mod accuracy;
-mod weakness;
 mod scraper;
+mod srs;
 mod tree;
+mod weakness;
 
 use db_manager::{GameRecord, PositionRecord, SqliteStore, TrainingEventRecord, TrainingStore};
 use engine_controller::{AnalysisConfig, StockfishEngine};
-use shakmaty::{CastlingMode, Chess, Position};
 use shakmaty::uci::Uci;
+use shakmaty::{CastlingMode, Chess, Position};
 use slint::Model;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -48,7 +48,7 @@ slint::slint! {
         background: active ? #2d2d35 : #00000000;
         border-radius: 8px;
         animate background { duration: 150ms; }
-        
+
         TouchArea {
             clicked => { root.clicked(); }
         }
@@ -67,6 +67,24 @@ slint::slint! {
         min-width: 1000px;
         min-height: 700px;
         background: #121214;
+
+        pure function piece-symbol(piece: string) -> string {
+            return piece == "P" || piece == "p" ? "♟"
+                : piece == "N" || piece == "n" ? "♞"
+                : piece == "B" || piece == "b" ? "♝"
+                : piece == "R" || piece == "r" ? "♜"
+                : piece == "Q" || piece == "q" ? "♛"
+                : piece == "K" || piece == "k" ? "♚"
+                : "";
+        }
+
+        pure function piece-color(piece: string) -> color {
+            return piece == "P" || piece == "N" || piece == "B" || piece == "R" || piece == "Q" || piece == "K"
+                ? #f8fafc
+                : piece == ""
+                    ? #00000000
+                    : #111827;
+        }
 
         // Properties for dashboard
         in-out property <string> rec-mode: "ReviewRecentGame";
@@ -97,14 +115,14 @@ slint::slint! {
 
         // Interactive board pieces (64 strings)
         in-out property <[string]> board-pieces: [
-            "♜", "♞", "♝", "♛", "♚", "♝", "♞", "♜",
-            "♟", "♟", "♟", "♟", "♟", "♟", "♟", "♟",
+            "r", "n", "b", "q", "k", "b", "n", "r",
+            "p", "p", "p", "p", "p", "p", "p", "p",
             "", "", "", "", "", "", "", "",
             "", "", "", "", "", "", "", "",
             "", "", "", "", "", "", "", "",
             "", "", "", "", "", "", "", "",
-            "♙", "♙", "♙", "♙", "♙", "♙", "♙", "♙",
-            "♖", "♘", "♗", "♕", "♔", "♗", "♘", "♖"
+            "P", "P", "P", "P", "P", "P", "P", "P",
+            "R", "N", "B", "Q", "K", "B", "N", "R"
         ];
         in-out property <int> board-selected-square: -1;
 
@@ -127,14 +145,14 @@ slint::slint! {
         in-out property <string> builder-line-name: "";
         in-out property <int> builder-selected-square: -1;
         in-out property <[string]> builder-board-pieces: [
-            "♜","♞","♝","♛","♚","♝","♞","♜",
-            "♟","♟","♟","♟","♟","♟","♟","♟",
+            "r","n","b","q","k","b","n","r",
+            "p","p","p","p","p","p","p","p",
             "","","","","","","","",
             "","","","","","","","",
             "","","","","","","","",
             "","","","","","","","",
-            "♙","♙","♙","♙","♙","♙","♙","♙",
-            "♖","♘","♗","♕","♔","♗","♘","♖"
+            "P","P","P","P","P","P","P","P",
+            "R","N","B","Q","K","B","N","R"
         ];
 
         // Drill branch info
@@ -146,14 +164,14 @@ slint::slint! {
 
         // Play-vs-bot screen state
         in-out property <[string]> play-board-pieces: [
-            "♜", "♞", "♝", "♛", "♚", "♝", "♞", "♜",
-            "♟", "♟", "♟", "♟", "♟", "♟", "♟", "♟",
+            "r", "n", "b", "q", "k", "b", "n", "r",
+            "p", "p", "p", "p", "p", "p", "p", "p",
             "", "", "", "", "", "", "", "",
             "", "", "", "", "", "", "", "",
             "", "", "", "", "", "", "", "",
             "", "", "", "", "", "", "", "",
-            "♙", "♙", "♙", "♙", "♙", "♙", "♙", "♙",
-            "♖", "♘", "♗", "♕", "♔", "♗", "♘", "♖"
+            "P", "P", "P", "P", "P", "P", "P", "P",
+            "R", "N", "B", "Q", "K", "B", "N", "R"
         ];
         in-out property <int> play-selected-square: -1;
         in-out property <string> play-status: "Choose color and start a game.";
@@ -201,7 +219,7 @@ slint::slint! {
                 background: #1a1a1e;
                 border-color: #27272a;
                 border-width: 1px;
-                
+
                 VerticalLayout {
                     padding: 16px;
                     spacing: 24px;
@@ -316,7 +334,7 @@ slint::slint! {
                     HorizontalLayout {
                         spacing: 16px;
                         height: 100px;
-                        
+
                         // Card 1
                         Rectangle {
                             background: #1a1a1e;
@@ -468,7 +486,7 @@ slint::slint! {
                                         border-radius: 8px;
                                         padding: 12px;
                                         height: 90px;
-                                        
+
                                         TouchArea {
                                             clicked => {
                                                 root.select-repertoire-line(line.id);
@@ -514,9 +532,10 @@ slint::slint! {
                                     : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
 
                                 Text {
-                                    text: root.board-pieces[index];
+                                    text: root.piece-symbol(root.board-pieces[index]);
                                     font-size: 28px;
-                                    color: #000000;
+                                    font-family: "Segoe UI Symbol";
+                                    color: root.piece-color(root.board-pieces[index]);
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
@@ -621,7 +640,7 @@ slint::slint! {
                                         border-radius: 8px;
                                         padding: 12px;
                                         height: 85px;
-                                        
+
                                         TouchArea {
                                             clicked => {
                                                 root.select-game(game.id);
@@ -646,12 +665,12 @@ slint::slint! {
                     // Game Evaluation and Timeline Board (Right Column)
                     if (root.selected-game-id != "") : HorizontalLayout {
                         spacing: 20px;
-                        
+
                         // Board View
                         VerticalLayout {
                             spacing: 12px;
                             alignment: center;
-                            
+
                             Rectangle {
                                 width: 360px;
                                 height: 360px;
@@ -668,9 +687,10 @@ slint::slint! {
                                     background: (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
 
                                     Text {
-                                        text: root.board-pieces[index];
+                                        text: root.piece-symbol(root.board-pieces[index]);
                                         font-size: 28px;
-                                        color: #000000;
+                                        font-family: "Segoe UI Symbol";
+                                        color: root.piece-color(root.board-pieces[index]);
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
@@ -820,9 +840,10 @@ slint::slint! {
                                     ? #7c3aed
                                     : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
                                 Text {
-                                    text: root.builder-board-pieces[index];
+                                    text: root.piece-symbol(root.builder-board-pieces[index]);
                                     font-size: 28px;
-                                    color: #000000;
+                                    font-family: "Segoe UI Symbol";
+                                    color: root.piece-color(root.builder-board-pieces[index]);
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
@@ -978,8 +999,10 @@ slint::slint! {
                                 ? #fcd34d
                                 : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
                             Text {
-                                text: root.play-board-pieces[index];
-                                font-size: 28px; color: #000000;
+                                text: root.piece-symbol(root.play-board-pieces[index]);
+                                font-size: 28px;
+                                font-family: "Segoe UI Symbol";
+                                color: root.piece-color(root.play-board-pieces[index]);
                                 horizontal-alignment: center; vertical-alignment: center;
                             }
                             TouchArea { clicked => { root.play-click-square(index); } }
@@ -1033,7 +1056,7 @@ slint::slint! {
     }
 }
 
-// Convert FEN string to a board setup of 64 characters
+// Convert FEN string to 64 side-aware piece codes so the UI can pick glyphs/colors.
 fn fen_to_pieces(fen: &str) -> Vec<slint::SharedString> {
     let board_part = fen.split_whitespace().next().unwrap_or(fen);
     let mut pieces = vec![slint::SharedString::from(""); 64];
@@ -1046,13 +1069,8 @@ fn fen_to_pieces(fen: &str) -> Vec<slint::SharedString> {
         if let Some(digit) = ch.to_digit(10) {
             square_idx += digit as usize;
         } else {
-            let symbol = match ch {
-                'P' => "♙", 'N' => "♘", 'B' => "♗", 'R' => "♖", 'Q' => "♕", 'K' => "♔",
-                'p' => "♟", 'n' => "♞", 'b' => "♝", 'r' => "♜", 'q' => "♛", 'k' => "♚",
-                _ => "",
-            };
             if square_idx < 64 {
-                pieces[square_idx] = slint::SharedString::from(symbol);
+                pieces[square_idx] = slint::SharedString::from(ch.to_string());
             }
             square_idx += 1;
         }
@@ -1068,7 +1086,6 @@ fn index_to_square(idx: usize) -> String {
     let rank = (b'8' - row as u8) as char;
     format!("{}{}", file, rank)
 }
-
 
 // Compute dynamic centipawn loss and mistake class
 fn score_to_centipawns(score: engine_controller::Score) -> i32 {
@@ -1094,7 +1111,11 @@ fn find_stockfish_path() -> String {
     // Prefer a real stockfish from PATH before falling back to the mock engine
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join(if cfg!(windows) { "stockfish.exe" } else { "stockfish" });
+            let candidate = dir.join(if cfg!(windows) {
+                "stockfish.exe"
+            } else {
+                "stockfish"
+            });
             if candidate.exists() {
                 return candidate.to_string_lossy().to_string();
             }
@@ -1139,12 +1160,23 @@ fn ingest_pgn_game(
     let game = GameRecord {
         id: game_id.to_string(),
         source: source.to_string(),
-        white: parsed.headers.get("White").cloned().unwrap_or_else(|| "White".into()),
-        black: parsed.headers.get("Black").cloned().unwrap_or_else(|| "Black".into()),
+        white: parsed
+            .headers
+            .get("White")
+            .cloned()
+            .unwrap_or_else(|| "White".into()),
+        black: parsed
+            .headers
+            .get("Black")
+            .cloned()
+            .unwrap_or_else(|| "Black".into()),
         result: parsed.result.clone(),
         eco: parsed.headers.get("ECO").cloned(),
         pgn: pgn.to_string(),
-        played_at: parsed.headers.get("Date").cloned()
+        played_at: parsed
+            .headers
+            .get("Date")
+            .cloned()
             .map(|d| d.replace('.', "-"))
             .or(fallback_date),
     };
@@ -1168,8 +1200,8 @@ struct AppState {
     db: SqliteStore,
     stockfish_path: String,
     // Tree-based drill session
-    drill_side: String,                 // "White" | "Black"
-    drill_chess: Chess,                 // current drill position (kept)
+    drill_side: String,                                    // "White" | "Black"
+    drill_chess: Chess,                                    // current drill position (kept)
     drill_expected: Vec<db_manager::RepertoireMoveRecord>, // my-move edges at current node
     drill_start_edge: Option<db_manager::RepertoireMoveRecord>,
     // Current board FEN for explorer
@@ -1182,7 +1214,7 @@ struct AppState {
     // Play-vs-bot session
     play_chess: Chess,
     play_moves_uci: Vec<String>,
-    play_side: String,             // user's color: "White" | "Black"
+    play_side: String, // user's color: "White" | "Black"
     play_session: Option<engine_controller::PlaySession>,
     play_deviations: Vec<String>,
     play_plies_in_book: u32,
@@ -1196,7 +1228,8 @@ fn main() {
     // Initialize database
     let mut db = SqliteStore::new("forge.db").expect("failed to open database file forge.db");
     db.bootstrap().expect("failed to bootstrap database tables");
-    db.run_migrations().expect("failed to run database migrations");
+    db.run_migrations()
+        .expect("failed to run database migrations");
 
     let migrated = tree::migrate_legacy_lines(&mut db).unwrap_or_else(|e| {
         eprintln!("legacy line migration failed (continuing on tree): {e}");
@@ -1250,10 +1283,14 @@ fn main() {
 
             // Weakness profile
             let all_positions: Vec<(u32, Option<i32>, Option<String>, Option<String>)> = {
-                let mut stmt = state.db.conn.prepare(
-                    "SELECT p.ply, p.centipawn_loss, p.mistake_class, g.eco
-                     FROM positions p JOIN games g ON g.id = p.game_id"
-                ).unwrap();
+                let mut stmt = state
+                    .db
+                    .conn
+                    .prepare(
+                        "SELECT p.ply, p.centipawn_loss, p.mistake_class, g.eco
+                     FROM positions p JOIN games g ON g.id = p.game_id",
+                    )
+                    .unwrap();
                 stmt.query_map([], |row| {
                     Ok((
                         row.get::<_, u32>(0)?,
@@ -1261,7 +1298,10 @@ fn main() {
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
                     ))
-                }).unwrap().filter_map(|r| r.ok()).collect()
+                })
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
             };
             let avg_endgame_acc = state.db.conn.query_row(
                 "SELECT COALESCE(AVG(accuracy_endgame), 100.0) FROM games WHERE accuracy_endgame IS NOT NULL",
@@ -1279,43 +1319,64 @@ fn main() {
 
             // Refresh game list
             let games = state.db.get_games().unwrap_or_default();
-            let game_entries: Vec<GameEntry> = games.into_iter().map(|g| GameEntry {
-                id: slint::SharedString::from(g.id),
-                white: slint::SharedString::from(g.white),
-                black: slint::SharedString::from(g.black),
-                result: slint::SharedString::from(g.result.unwrap_or_else(|| "*".to_string())),
-                date: slint::SharedString::from(g.played_at.unwrap_or_else(|| "2026-06-12".to_string())),
-                pgn: slint::SharedString::from(g.pgn),
-            }).collect();
-            app.set_games(slint::ModelRc::from(Rc::new(slint::VecModel::from(game_entries))));
+            let game_entries: Vec<GameEntry> = games
+                .into_iter()
+                .map(|g| GameEntry {
+                    id: slint::SharedString::from(g.id),
+                    white: slint::SharedString::from(g.white),
+                    black: slint::SharedString::from(g.black),
+                    result: slint::SharedString::from(g.result.unwrap_or_else(|| "*".to_string())),
+                    date: slint::SharedString::from(
+                        g.played_at.unwrap_or_else(|| "2026-06-12".to_string()),
+                    ),
+                    pgn: slint::SharedString::from(g.pgn),
+                })
+                .collect();
+            app.set_games(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                game_entries,
+            ))));
 
             // Refresh due repertoire moves (drill queue)
-            let due = state.db.get_due_repertoire_moves(&today).unwrap_or_default();
-            let line_entries: Vec<OpeningLineEntry> = due.iter().map(|e| OpeningLineEntry {
-                id: slint::SharedString::from(e.id.to_string()),
-                name: slint::SharedString::from(format!("{} ({})", e.san, e.source)),
-                moves: slint::SharedString::from(e.uci.clone()),
-                confidence: (e.srs_reps as f32 / 10.0).min(1.0),
-                start_fen: slint::SharedString::from(e.parent_fen.clone()),
-            }).collect();
-            app.set_opening_lines(slint::ModelRc::from(Rc::new(slint::VecModel::from(line_entries))));
+            let due = state
+                .db
+                .get_due_repertoire_moves(&today)
+                .unwrap_or_default();
+            let line_entries: Vec<OpeningLineEntry> = due
+                .iter()
+                .map(|e| OpeningLineEntry {
+                    id: slint::SharedString::from(e.id.to_string()),
+                    name: slint::SharedString::from(format!("{} ({})", e.san, e.source)),
+                    moves: slint::SharedString::from(e.uci.clone()),
+                    confidence: (e.srs_reps as f32 / 10.0).min(1.0),
+                    start_fen: slint::SharedString::from(e.parent_fen.clone()),
+                })
+                .collect();
+            app.set_opening_lines(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                line_entries,
+            ))));
 
             // Refresh training logs
             let mut stmt = state.db.conn.prepare("SELECT kind, target_id, outcome, score_delta, created_at FROM training_events ORDER BY created_at DESC").unwrap();
-            let logs = stmt.query_map([], |row| {
-                Ok(HistoryEntry {
-                    kind: slint::SharedString::from(row.get::<_, String>(0)?),
-                    target: slint::SharedString::from(row.get::<_, String>(1)?),
-                    outcome: slint::SharedString::from(row.get::<_, String>(2)?),
-                    delta: row.get::<_, f64>(3)? as f32,
-                    date: slint::SharedString::from(row.get::<_, String>(4)?),
+            let logs = stmt
+                .query_map([], |row| {
+                    Ok(HistoryEntry {
+                        kind: slint::SharedString::from(row.get::<_, String>(0)?),
+                        target: slint::SharedString::from(row.get::<_, String>(1)?),
+                        outcome: slint::SharedString::from(row.get::<_, String>(2)?),
+                        delta: row.get::<_, f64>(3)? as f32,
+                        date: slint::SharedString::from(row.get::<_, String>(4)?),
+                    })
                 })
-            }).unwrap();
+                .unwrap();
             let mut log_list = Vec::new();
             for log in logs {
-                if let Ok(l) = log { log_list.push(l); }
+                if let Ok(l) = log {
+                    log_list.push(l);
+                }
             }
-            app.set_history(slint::ModelRc::from(Rc::new(slint::VecModel::from(log_list))));
+            app.set_history(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                log_list,
+            ))));
         }
     };
 
@@ -1340,7 +1401,10 @@ fn main() {
             let state = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
 
-            let positions = state.db.get_positions_for_game(&game_id).unwrap_or_default();
+            let positions = state
+                .db
+                .get_positions_for_game(&game_id)
+                .unwrap_or_default();
             let mut moves = Vec::new();
             let mut losses = Vec::new();
             let mut classes = Vec::new();
@@ -1348,21 +1412,35 @@ fn main() {
 
             for pos in &positions {
                 moves.push(slint::SharedString::from(pos.played_move.clone()));
-                losses.push(slint::SharedString::from(pos.centipawn_loss.map(|l| l.to_string()).unwrap_or_default()));
-                classes.push(slint::SharedString::from(pos.mistake_class.clone().unwrap_or_default()));
+                losses.push(slint::SharedString::from(
+                    pos.centipawn_loss
+                        .map(|l| l.to_string())
+                        .unwrap_or_default(),
+                ));
+                classes.push(slint::SharedString::from(
+                    pos.mistake_class.clone().unwrap_or_default(),
+                ));
                 fens.push(slint::SharedString::from(pos.fen.clone()));
             }
 
             app.set_selected_game_id(game_id.clone());
             app.set_selected_game_title(slint::SharedString::from("Timeline"));
-            app.set_selected_game_moves(slint::ModelRc::from(Rc::new(slint::VecModel::from(moves))));
-            app.set_selected_game_losses(slint::ModelRc::from(Rc::new(slint::VecModel::from(losses))));
-            app.set_selected_game_classes(slint::ModelRc::from(Rc::new(slint::VecModel::from(classes))));
+            app.set_selected_game_moves(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                moves,
+            ))));
+            app.set_selected_game_losses(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                losses,
+            ))));
+            app.set_selected_game_classes(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                classes,
+            ))));
             app.set_selected_game_fens(slint::ModelRc::from(Rc::new(slint::VecModel::from(fens))));
             app.set_selected_move_index(-1);
 
             // Reset board to starting pos
-            app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")))));
+            app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"),
+            ))));
         });
     }
 
@@ -1375,17 +1453,30 @@ fn main() {
 
             let fens = app.get_selected_game_fens();
             if let Some(fen) = fens.row_data(idx as usize) {
-                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(fen_to_pieces(&fen)))));
+                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                    fen_to_pieces(&fen),
+                ))));
 
-                let class = app.get_selected_game_classes().row_data(idx as usize).unwrap_or_default();
-                let loss = app.get_selected_game_losses().row_data(idx as usize).unwrap_or_default();
+                let class = app
+                    .get_selected_game_classes()
+                    .row_data(idx as usize)
+                    .unwrap_or_default();
+                let loss = app
+                    .get_selected_game_losses()
+                    .row_data(idx as usize)
+                    .unwrap_or_default();
 
                 if class != "" {
-                    app.set_selected_move_eval(slint::SharedString::from(format!("{} (Lost {} cp)", class, loss)));
+                    app.set_selected_move_eval(slint::SharedString::from(format!(
+                        "{} (Lost {} cp)",
+                        class, loss
+                    )));
                 } else {
                     app.set_selected_move_eval(slint::SharedString::from("Optimal or Incomplete"));
                 }
-                app.set_selected_move_best(slint::SharedString::from("Check bestmove in timeline."));
+                app.set_selected_move_best(slint::SharedString::from(
+                    "Check bestmove in timeline.",
+                ));
             }
         });
     }
@@ -1397,13 +1488,23 @@ fn main() {
         app.on_select_repertoire_line(move |edge_id: slint::SharedString| {
             let mut state = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
-            let id: i64 = match edge_id.parse() { Ok(v) => v, Err(_) => return };
+            let id: i64 = match edge_id.parse() {
+                Ok(v) => v,
+                Err(_) => return,
+            };
             if let Ok(Some(edge)) = state.db.get_repertoire_move(id) {
                 app.set_drill_line_id(edge_id);
-                app.set_drill_name(slint::SharedString::from(format!("Drill: {} ({})", edge.san, edge.source)));
-                app.set_drill_instructions(slint::SharedString::from("Press 'Start Drill' to practice from this position."));
+                app.set_drill_name(slint::SharedString::from(format!(
+                    "Drill: {} ({})",
+                    edge.san, edge.source
+                )));
+                app.set_drill_instructions(slint::SharedString::from(
+                    "Press 'Start Drill' to practice from this position.",
+                ));
                 app.set_drill_active(false);
-                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(fen_to_pieces(&edge.parent_fen)))));
+                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                    fen_to_pieces(&edge.parent_fen),
+                ))));
                 app.set_board_selected_square(-1);
                 state.drill_start_edge = Some(edge);
             }
@@ -1417,10 +1518,19 @@ fn main() {
         app.on_start_drill(move || {
             let mut state = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
-            let Some(edge) = state.drill_start_edge.clone() else { return };
-            let Ok(Some((side, fen))) = state.db.get_node_side_and_fen(edge.parent_id) else { return };
-            let parsed: shakmaty::fen::Fen = match fen.parse() { Ok(f) => f, Err(_) => return };
-            let Ok(pos) = parsed.into_position(CastlingMode::Standard) else { return };
+            let Some(edge) = state.drill_start_edge.clone() else {
+                return;
+            };
+            let Ok(Some((side, fen))) = state.db.get_node_side_and_fen(edge.parent_id) else {
+                return;
+            };
+            let parsed: shakmaty::fen::Fen = match fen.parse() {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            let Ok(pos) = parsed.into_position(CastlingMode::Standard) else {
+                return;
+            };
             state.drill_side = side.clone();
             state.drill_chess = pos;
             state.drill_expected.clear();
@@ -1437,16 +1547,30 @@ fn main() {
         app.on_click_board_square(move |idx: i32| {
             let mut state = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
-            if !app.get_drill_active() { return; }
+            if !app.get_drill_active() {
+                return;
+            }
             let sel = app.get_board_selected_square();
-            if sel == -1 { app.set_board_selected_square(idx); return; }
+            if sel == -1 {
+                app.set_board_selected_square(idx);
+                return;
+            }
             app.set_board_selected_square(-1);
-            let uci_try = format!("{}{}", index_to_square(sel as usize), index_to_square(idx as usize));
+            let uci_try = format!(
+                "{}{}",
+                index_to_square(sel as usize),
+                index_to_square(idx as usize)
+            );
 
             let today_days = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() / 86400;
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                / 86400;
 
-            let matched = state.drill_expected.iter()
+            let matched = state
+                .drill_expected
+                .iter()
                 .find(|e| e.uci == uci_try || e.uci == format!("{}q", uci_try))
                 .cloned();
 
@@ -1466,13 +1590,20 @@ fn main() {
                     if let Ok(m) = uci.to_move(&state.drill_chess) {
                         state.drill_chess.play_unchecked(&m);
                         let fen = shakmaty::fen::Fen::from_position(
-                            state.drill_chess.clone(), shakmaty::EnPassantMode::Legal).to_string();
-                        app.set_board_pieces(slint::ModelRc::from(Rc::new(
-                            slint::VecModel::from(fen_to_pieces(&fen)))));
+                            state.drill_chess.clone(),
+                            shakmaty::EnPassantMode::Legal,
+                        )
+                        .to_string();
+                        app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                            fen_to_pieces(&fen),
+                        ))));
                     }
                 }
                 drill_advance(&mut state, &app);
-                if !app.get_drill_active() { drop(state); refresh_data_cp(); }
+                if !app.get_drill_active() {
+                    drop(state);
+                    refresh_data_cp();
+                }
             } else {
                 // Wrong move: fail every expected edge at this node (they were all "the answer")
                 for edge in state.drill_expected.clone() {
@@ -1489,7 +1620,8 @@ fn main() {
                 };
                 let _ = state.db.insert_training_event(&event);
                 app.set_drill_instructions(slint::SharedString::from(
-                    "Not in your repertoire here — try again (this move is now due for review)."));
+                    "Not in your repertoire here — try again (this move is now due for review).",
+                ));
                 drop(state);
                 refresh_data_cp();
             }
@@ -1724,13 +1856,24 @@ fn main() {
                         let mut new_count = 0u32;
                         let mut skipped = 0u32;
                         for g in &games {
-                            if st.db.is_synced("lichess", &g.id) { continue; }
-                            let Some(pgn) = g.pgn.clone() else { skipped += 1; continue; };
+                            if st.db.is_synced("lichess", &g.id) {
+                                continue;
+                            }
+                            let Some(pgn) = g.pgn.clone() else {
+                                skipped += 1;
+                                continue;
+                            };
                             let date = g.created_at.map(|ms| {
                                 let (y, m, d) = tree::days_to_ymd(ms / 86_400_000);
                                 format!("{:04}-{:02}-{:02}", y, m, d)
                             });
-                            match ingest_pgn_game(&mut st.db, &format!("lichess_{}", g.id), "lichess", &pgn, date) {
+                            match ingest_pgn_game(
+                                &mut st.db,
+                                &format!("lichess_{}", g.id),
+                                "lichess",
+                                &pgn,
+                                date,
+                            ) {
                                 Ok(()) => new_count += 1,
                                 Err(e) => {
                                     eprintln!("sync: failed to ingest lichess game {}: {e}", g.id);
@@ -1741,7 +1884,9 @@ fn main() {
                         }
                         drop(st);
                         // refresh_data is Rc (non-Send), invoke on event loop thread
-                        let _ = slint::invoke_from_event_loop(move || { refresh_data_cp(); });
+                        let _ = slint::invoke_from_event_loop(move || {
+                            refresh_data_cp();
+                        });
                         format!("Lichess: {new_count} new game(s), {skipped} skipped")
                     }
                     Err(e) => format!("Sync failed: {}", e),
@@ -1791,9 +1936,13 @@ fn main() {
                         for g in games.iter().rev() {
                             let ext_id = chesscom_client::game_external_id(g);
                             let mut st = state.lock().unwrap();
-                            if st.db.is_synced("chesscom", &ext_id) { continue; }
+                            if st.db.is_synced("chesscom", &ext_id) {
+                                continue;
+                            }
                             let Some(pgn) = g.pgn.clone() else {
-                                let _ = st.db.mark_synced("chesscom", &ext_id, &tree::local_now_str());
+                                let _ =
+                                    st.db
+                                        .mark_synced("chesscom", &ext_id, &tree::local_now_str());
                                 skipped += 1;
                                 continue;
                             };
@@ -1801,19 +1950,32 @@ fn main() {
                                 let (y, m, d) = tree::days_to_ymd(secs / 86_400);
                                 format!("{:04}-{:02}-{:02}", y, m, d)
                             });
-                            match ingest_pgn_game(&mut st.db, &format!("chesscom_{ext_id}"), "chesscom", &pgn, date) {
+                            match ingest_pgn_game(
+                                &mut st.db,
+                                &format!("chesscom_{ext_id}"),
+                                "chesscom",
+                                &pgn,
+                                date,
+                            ) {
                                 Ok(()) => new_count += 1,
                                 Err(e) => {
                                     eprintln!("sync: failed to ingest chesscom game {ext_id}: {e}");
                                     skipped += 1;
                                 }
                             }
-                            let _ = st.db.mark_synced("chesscom", &ext_id, &tree::local_now_str());
-                            if new_count >= 50 { break 'outer; }
+                            let _ = st
+                                .db
+                                .mark_synced("chesscom", &ext_id, &tree::local_now_str());
+                            if new_count >= 50 {
+                                break 'outer;
+                            }
                         }
                     }
-                    Ok(format!("Chess.com: {new_count} new game(s), {skipped} skipped"))
-                })().unwrap_or_else(|e| format!("Chess.com sync failed: {e}"));
+                    Ok(format!(
+                        "Chess.com: {new_count} new game(s), {skipped} skipped"
+                    ))
+                })()
+                .unwrap_or_else(|e| format!("Chess.com sync failed: {e}"));
                 let _ = slint::invoke_from_event_loop(move || {
                     refresh_data_cp();
                 });
@@ -1874,11 +2036,15 @@ fn main() {
                 if let Some(app) = app_weak.upgrade() {
                     let pieces = fen_to_pieces(&fen);
                     app.set_board_pieces(slint::ModelRc::new(slint::VecModel::from(
-                        pieces.iter().map(|s| slint::SharedString::from(s.as_str())).collect::<Vec<_>>(),
+                        pieces
+                            .iter()
+                            .map(|s| slint::SharedString::from(s.as_str()))
+                            .collect::<Vec<_>>(),
                     )));
-                    app.set_drill_instructions(slint::SharedString::from(
-                        format!("Puzzle: find the best move ({})", puzzle.id),
-                    ));
+                    app.set_drill_instructions(slint::SharedString::from(format!(
+                        "Puzzle: find the best move ({})",
+                        puzzle.id
+                    )));
                 }
             } else {
                 drop(st);
@@ -1896,12 +2062,14 @@ fn main() {
                 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string()
             });
             drop(st);
-            use shakmaty::{CastlingMode, Chess, EnPassantMode, Position};
             use shakmaty::fen::Fen;
             use shakmaty::uci::Uci;
+            use shakmaty::{CastlingMode, Chess, EnPassantMode, Position};
             let new_fen = (|| -> Result<String, String> {
                 let parsed: Fen = fen.parse().map_err(|e| format!("{e}"))?;
-                let pos: Chess = parsed.into_position(CastlingMode::Standard).map_err(|e| format!("{e}"))?;
+                let pos: Chess = parsed
+                    .into_position(CastlingMode::Standard)
+                    .map_err(|e| format!("{e}"))?;
                 let uci_move: Uci = uci.to_string().parse().map_err(|e| format!("{e}"))?;
                 let m = uci_move.to_move(&pos).map_err(|e| format!("{e}"))?;
                 let next = pos.play(&m).map_err(|e| format!("{e}"))?;
@@ -1911,7 +2079,10 @@ fn main() {
                 if let Some(app) = app_weak.upgrade() {
                     let pieces = fen_to_pieces(&new_fen);
                     app.set_board_pieces(slint::ModelRc::new(slint::VecModel::from(
-                        pieces.iter().map(|s| slint::SharedString::from(s.as_str())).collect::<Vec<_>>(),
+                        pieces
+                            .iter()
+                            .map(|s| slint::SharedString::from(s.as_str()))
+                            .collect::<Vec<_>>(),
                     )));
                 }
             }
@@ -1934,23 +2105,29 @@ fn main() {
                 let from_sq = index_to_square(from);
                 let to_sq = index_to_square(sq);
                 let uci = format!("{}{}", from_sq, to_sq);
-                use shakmaty::{EnPassantMode, Position};
                 use shakmaty::uci::Uci;
+                use shakmaty::{EnPassantMode, Position};
                 let uci_move: Uci = match uci.parse() {
                     Ok(u) => u,
-                    Err(_) => { st.builder_selected_sq = None; app.set_builder_selected_square(-1); return; }
+                    Err(_) => {
+                        st.builder_selected_sq = None;
+                        app.set_builder_selected_square(-1);
+                        return;
+                    }
                 };
                 match uci_move.to_move(&st.builder_chess) {
                     Ok(m) => {
                         st.builder_chess.play_unchecked(&m);
                         st.builder_staged_uci.push(uci.clone());
                         let new_fen = shakmaty::fen::Fen::from_position(
-                            st.builder_chess.clone(), EnPassantMode::Always,
-                        ).to_string();
+                            st.builder_chess.clone(),
+                            EnPassantMode::Always,
+                        )
+                        .to_string();
                         let pieces = fen_to_pieces(&new_fen);
-                        app.set_builder_board_pieces(slint::ModelRc::from(
-                            Rc::new(slint::VecModel::from(pieces)),
-                        ));
+                        app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(
+                            slint::VecModel::from(pieces),
+                        )));
                         app.set_builder_fen(slint::SharedString::from(new_fen));
                         app.set_builder_moves(slint::SharedString::from(
                             st.builder_staged_uci.join(" "),
@@ -1974,10 +2151,12 @@ fn main() {
         let app_weak = app_weak.clone();
         app.on_builder_undo(move || {
             let mut st = state.lock().unwrap();
-            if st.builder_staged_uci.pop().is_none() { return; }
+            if st.builder_staged_uci.pop().is_none() {
+                return;
+            }
             // Rebuild position from start
-            use shakmaty::{CastlingMode, Position};
             use shakmaty::uci::Uci;
+            use shakmaty::{CastlingMode, Position};
             let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
             let parsed: shakmaty::fen::Fen = start_fen.parse().unwrap();
             let mut pos: shakmaty::Chess = parsed.into_position(CastlingMode::Standard).unwrap();
@@ -1990,11 +2169,15 @@ fn main() {
             }
             st.builder_chess = pos;
             let new_fen = shakmaty::fen::Fen::from_position(
-                st.builder_chess.clone(), shakmaty::EnPassantMode::Always,
-            ).to_string();
+                st.builder_chess.clone(),
+                shakmaty::EnPassantMode::Always,
+            )
+            .to_string();
             let app = app_weak.upgrade().unwrap();
             let pieces = fen_to_pieces(&new_fen);
-            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(pieces))));
+            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                pieces,
+            ))));
             app.set_builder_fen(slint::SharedString::from(new_fen));
             app.set_builder_moves(slint::SharedString::from(st.builder_staged_uci.join(" ")));
             app.set_builder_selected_square(-1);
@@ -2014,7 +2197,9 @@ fn main() {
             let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
             let app = app_weak.upgrade().unwrap();
             let pieces = fen_to_pieces(start_fen);
-            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(pieces))));
+            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                pieces,
+            ))));
             app.set_builder_fen(slint::SharedString::from(start_fen));
             app.set_builder_moves(slint::SharedString::from(""));
             app.set_builder_line_name(slint::SharedString::from(""));
@@ -2042,16 +2227,19 @@ fn main() {
         let refresh_data_save = refresh_data.clone();
         app.on_builder_save_line(move || {
             let mut st = state.lock().unwrap();
-            if st.builder_staged_uci.is_empty() { return; }
+            if st.builder_staged_uci.is_empty() {
+                return;
+            }
             let app = app_weak.upgrade().unwrap();
             let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
             let staged = st.builder_staged_uci.clone();
             let side = st.builder_color.clone();
             match tree::import_uci_line(&mut st.db, start_fen, &staged, &side, "manual") {
-                Ok(n) => app.set_drill_instructions(slint::SharedString::from(
-                    format!("Saved: {n} new move(s) added to your {side} repertoire."))),
-                Err(e) => app.set_drill_instructions(slint::SharedString::from(
-                    format!("Save failed: {e}"))),
+                Ok(n) => app.set_drill_instructions(slint::SharedString::from(format!(
+                    "Saved: {n} new move(s) added to your {side} repertoire."
+                ))),
+                Err(e) => app
+                    .set_drill_instructions(slint::SharedString::from(format!("Save failed: {e}"))),
             }
             // Reset builder after save
             st.builder_chess = shakmaty::Chess::default();
@@ -2061,7 +2249,9 @@ fn main() {
             app.set_builder_moves(slint::SharedString::from(""));
             app.set_builder_line_name(slint::SharedString::from(""));
             let pieces = fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(pieces))));
+            app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                pieces,
+            ))));
             refresh_data_save();
         });
     }
@@ -2078,49 +2268,65 @@ fn main() {
             if let Some(game) = games.first() {
                 // Parse PGN, convert first 15 SAN moves to UCI
                 let parsed = pgn_processor::parse_pgn(&game.pgn);
-                use shakmaty::{CastlingMode, Position};
                 use shakmaty::san::San;
+                use shakmaty::{CastlingMode, Position};
                 let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
                 let parsed_start: shakmaty::fen::Fen = start_fen.parse().unwrap();
-                let mut suggest_pos: shakmaty::Chess = parsed_start.into_position(CastlingMode::Standard).unwrap();
+                let mut suggest_pos: shakmaty::Chess =
+                    parsed_start.into_position(CastlingMode::Standard).unwrap();
                 let mut first_15: Vec<String> = Vec::new();
                 for san_str in parsed.moves.iter().take(15) {
                     let san_str = san_str.trim_end_matches(['?', '!', '+', '#']);
                     if let Ok(san) = san_str.parse::<San>() {
                         if let Ok(m) = san.to_move(&suggest_pos) {
-                            let uci = shakmaty::uci::Uci::from_move(&m, shakmaty::CastlingMode::Standard);
+                            let uci =
+                                shakmaty::uci::Uci::from_move(&m, shakmaty::CastlingMode::Standard);
                             first_15.push(uci.to_string());
                             suggest_pos.play_unchecked(&m);
-                        } else { break; }
-                    } else { break; }
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
                 }
                 if !first_15.is_empty() {
                     app.set_builder_moves(slint::SharedString::from(first_15.join(" ")));
-                    app.set_builder_line_name(slint::SharedString::from(
-                        format!("{} vs {} (opening)", game.white, game.black),
-                    ));
+                    app.set_builder_line_name(slint::SharedString::from(format!(
+                        "{} vs {} (opening)",
+                        game.white, game.black
+                    )));
                     // Load the suggested moves into builder state
                     let mut st2 = state.lock().unwrap();
-                    use shakmaty::{CastlingMode, Position};
                     use shakmaty::uci::Uci;
+                    use shakmaty::{CastlingMode, Position};
                     let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
                     let parsed_fen: shakmaty::fen::Fen = start_fen.parse().unwrap();
-                    let mut pos: shakmaty::Chess = parsed_fen.into_position(CastlingMode::Standard).unwrap();
+                    let mut pos: shakmaty::Chess =
+                        parsed_fen.into_position(CastlingMode::Standard).unwrap();
                     let mut valid: Vec<String> = Vec::new();
                     for uci_str in &first_15 {
                         if let Ok(uci_move) = uci_str.parse::<Uci>() {
                             if let Ok(m) = uci_move.to_move(&pos) {
                                 pos.play_unchecked(&m);
                                 valid.push(uci_str.clone());
-                            } else { break; }
-                        } else { break; }
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
                     }
                     st2.builder_chess = pos.clone();
                     st2.builder_staged_uci = valid;
                     drop(st2);
-                    let fen = shakmaty::fen::Fen::from_position(pos, shakmaty::EnPassantMode::Always).to_string();
+                    let fen =
+                        shakmaty::fen::Fen::from_position(pos, shakmaty::EnPassantMode::Always)
+                            .to_string();
                     let pieces = fen_to_pieces(&fen);
-                    app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(pieces))));
+                    app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(
+                        slint::VecModel::from(pieces),
+                    )));
                     app.set_builder_fen(slint::SharedString::from(fen));
                 }
             } else {
@@ -2142,18 +2348,24 @@ fn main() {
             }
             let walked = match pgn_processor::walk_pgn_variations(&pgn) {
                 Ok(w) => w,
-                Err(e) => { app.set_import_status(slint::SharedString::from(format!("Parse error: {e}"))); return; }
+                Err(e) => {
+                    app.set_import_status(slint::SharedString::from(format!("Parse error: {e}")));
+                    return;
+                }
             };
             let total = walked.len();
             let mut st = state.lock().unwrap();
             match tree::import_walked(&mut st.db, &walked, &side, "pgn") {
                 Ok(n) => {
                     drop(st);
-                    app.set_import_status(slint::SharedString::from(
-                        format!("Imported {n} new move(s) ({total} parsed) into {side} repertoire.")));
+                    app.set_import_status(slint::SharedString::from(format!(
+                        "Imported {n} new move(s) ({total} parsed) into {side} repertoire."
+                    )));
                     refresh();
                 }
-                Err(e) => app.set_import_status(slint::SharedString::from(format!("Import failed: {e}"))),
+                Err(e) => {
+                    app.set_import_status(slint::SharedString::from(format!("Import failed: {e}")))
+                }
             }
         });
     }
@@ -2176,7 +2388,8 @@ fn main() {
                     }
                 });
                 let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
-                let username = std::env::var("LICHESS_USERNAME").unwrap_or_else(|_| "hackandtoss".into());
+                let username =
+                    std::env::var("LICHESS_USERNAME").unwrap_or_else(|_| "hackandtoss".into());
                 let client = lichess_client::LichessClient::new(&token);
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let msg = match rt.block_on(client.fetch_studies_pgn(&username)) {
@@ -2225,15 +2438,18 @@ fn main() {
                 let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
                 let client = lichess_client::LichessClient::new(&token);
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let (pairs, stop_reason) =
-                    rt.block_on(scraper::adopt_explorer_lines(&client, &start_fen, &side, 8, 3));
+                let (pairs, stop_reason) = rt.block_on(scraper::adopt_explorer_lines(
+                    &client, &start_fen, &side, 8, 3,
+                ));
                 let msg = {
                     let mut st = state.lock().unwrap();
                     let mut new_edges = 0u32;
                     for (parent_fen, uci) in &pairs {
                         match tree::add_move_edge(&mut st.db, parent_fen, uci, &side, "explorer") {
                             Ok((_, _, was_new)) => {
-                                if was_new { new_edges += 1; }
+                                if was_new {
+                                    new_edges += 1;
+                                }
                             }
                             Err(e) => {
                                 eprintln!("adopt: failed to insert edge {parent_fen} {uci}: {e}");
@@ -2242,9 +2458,9 @@ fn main() {
                     }
                     match stop_reason {
                         None => format!("Adopted {new_edges} new move(s) from master games."),
-                        Some(reason) => format!(
-                            "Adopted {new_edges} new move(s) — stopped early: {reason}"
-                        ),
+                        Some(reason) => {
+                            format!("Adopted {new_edges} new move(s) — stopped early: {reason}")
+                        }
                     }
                 };
                 let aw = app_weak.clone();
@@ -2276,7 +2492,8 @@ fn main() {
             app.set_play_active(true);
             app.set_play_summary(slint::SharedString::from(""));
             app.set_play_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
-                fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")))));
+                fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"),
+            ))));
             let msg = if st.play_side == "Black" {
                 bot_take_turn(&mut st, &app) // bot is White, moves first
             } else {
@@ -2293,16 +2510,32 @@ fn main() {
         app.on_play_click_square(move |idx: i32| {
             let mut st = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
-            if !app.get_play_active() { return; }
+            if !app.get_play_active() {
+                return;
+            }
             let sel = app.get_play_selected_square();
-            if sel == -1 { app.set_play_selected_square(idx); return; }
+            if sel == -1 {
+                app.set_play_selected_square(idx);
+                return;
+            }
             app.set_play_selected_square(-1);
-            let uci_try = format!("{}{}", index_to_square(sel as usize), index_to_square(idx as usize));
+            let uci_try = format!(
+                "{}{}",
+                index_to_square(sel as usize),
+                index_to_square(idx as usize)
+            );
 
             // Legality first (try promotion to queen as fallback).
-            let mv = uci_try.parse::<Uci>().ok().and_then(|u| u.to_move(&st.play_chess).ok())
-                .or_else(|| format!("{uci_try}q").parse::<Uci>().ok()
-                    .and_then(|u| u.to_move(&st.play_chess).ok()));
+            let mv = uci_try
+                .parse::<Uci>()
+                .ok()
+                .and_then(|u| u.to_move(&st.play_chess).ok())
+                .or_else(|| {
+                    format!("{uci_try}q")
+                        .parse::<Uci>()
+                        .ok()
+                        .and_then(|u| u.to_move(&st.play_chess).ok())
+                });
             let Some(m) = mv else {
                 app.set_play_status(slint::SharedString::from("Illegal move."));
                 return;
@@ -2312,16 +2545,23 @@ fn main() {
             // Book check BEFORE playing: was this position in book, and did we deviate?
             let key = tree::position_key(&st.play_chess);
             let side = st.play_side.clone();
-            let my_edges: Vec<_> = st.db.get_repertoire_moves_from(&key, &side)
-                .unwrap_or_default().into_iter().filter(|e| e.is_my_move).collect();
+            let my_edges: Vec<_> = st
+                .db
+                .get_repertoire_moves_from(&key, &side)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.is_my_move)
+                .collect();
             if !my_edges.is_empty() {
                 if my_edges.iter().any(|e| e.uci == played_uci) {
                     st.play_plies_in_book += 1;
                 } else {
                     let today_days = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() / 86400;
-                    let expected: Vec<String> =
-                        my_edges.iter().map(|e| e.san.clone()).collect();
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                        / 86400;
+                    let expected: Vec<String> = my_edges.iter().map(|e| e.san.clone()).collect();
                     for e in &my_edges {
                         let _ = tree::grade_edge(&mut st.db, e, 1, today_days);
                     }
@@ -2340,9 +2580,13 @@ fn main() {
             st.play_chess.play_unchecked(&m);
             st.play_moves_uci.push(played_uci);
             let fen = shakmaty::fen::Fen::from_position(
-                st.play_chess.clone(), shakmaty::EnPassantMode::Legal).to_string();
-            app.set_play_board_pieces(slint::ModelRc::from(Rc::new(
-                slint::VecModel::from(fen_to_pieces(&fen)))));
+                st.play_chess.clone(),
+                shakmaty::EnPassantMode::Legal,
+            )
+            .to_string();
+            app.set_play_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                fen_to_pieces(&fen),
+            ))));
 
             use shakmaty::Position;
             if st.play_chess.is_game_over() {
@@ -2350,10 +2594,14 @@ fn main() {
                 return;
             }
             let msg = bot_take_turn(&mut st, &app);
-            let ended = msg.contains("ended") || msg.contains("Engine")
-                || { use shakmaty::Position; st.play_chess.is_game_over() };
+            let ended = msg.contains("ended") || msg.contains("Engine") || {
+                use shakmaty::Position;
+                st.play_chess.is_game_over()
+            };
             app.set_play_status(slint::SharedString::from(msg));
-            if ended { finish_play_game(&mut st, &app, "Game over"); }
+            if ended {
+                finish_play_game(&mut st, &app, "Game over");
+            }
         });
     }
 
@@ -2432,7 +2680,10 @@ fn bot_take_turn(state: &mut AppState, app: &AppWindow) -> String {
         return "Game over.".to_string();
     }
     let key = tree::position_key(&state.play_chess);
-    let edges = state.db.get_repertoire_moves_from(&key, &state.play_side).unwrap_or_default();
+    let edges = state
+        .db
+        .get_repertoire_moves_from(&key, &state.play_side)
+        .unwrap_or_default();
     let book: Vec<_> = edges.into_iter().filter(|e| !e.is_my_move).collect();
 
     let uci_str = if !book.is_empty() {
@@ -2452,29 +2703,43 @@ fn bot_take_turn(state: &mut AppState, app: &AppWindow) -> String {
             let elo = app.get_play_elo().max(1320) as u32;
             match engine_controller::PlaySession::new(
                 &state.stockfish_path,
-                engine_controller::PlayConfig { elo: Some(elo), movetime_ms: 400 },
+                engine_controller::PlayConfig {
+                    elo: Some(elo),
+                    movetime_ms: 400,
+                },
             ) {
                 Ok(s) => state.play_session = Some(s),
-                Err(e) => return format!("Engine unavailable — book-only mode ended the game. ({e})"),
+                Err(e) => {
+                    return format!("Engine unavailable — book-only mode ended the game. ({e})")
+                }
             }
         }
-        match state.play_session.as_mut().unwrap().best_move_from(&state.play_moves_uci) {
+        match state
+            .play_session
+            .as_mut()
+            .unwrap()
+            .best_move_from(&state.play_moves_uci)
+        {
             Ok(m) => m,
             Err(e) => return format!("Engine error: {e}"),
         }
     };
 
-    let Ok(uci) = uci_str.parse::<Uci>() else { return format!("Bot produced bad move {uci_str} — game ended.") };
+    let Ok(uci) = uci_str.parse::<Uci>() else {
+        return format!("Bot produced bad move {uci_str} — game ended.");
+    };
     let Ok(m) = uci.to_move(&state.play_chess) else {
         // Mock engine can emit illegal moves in arbitrary positions; end gracefully.
         return format!("Bot move {uci_str} not legal here — game ended.");
     };
     state.play_chess.play_unchecked(&m);
     state.play_moves_uci.push(uci_str.clone());
-    let fen = shakmaty::fen::Fen::from_position(
-        state.play_chess.clone(), shakmaty::EnPassantMode::Legal).to_string();
+    let fen =
+        shakmaty::fen::Fen::from_position(state.play_chess.clone(), shakmaty::EnPassantMode::Legal)
+            .to_string();
     app.set_play_board_pieces(slint::ModelRc::from(std::rc::Rc::new(
-        slint::VecModel::from(fen_to_pieces(&fen)))));
+        slint::VecModel::from(fen_to_pieces(&fen)),
+    )));
     format!("Bot played {uci_str}. Your move.")
 }
 
@@ -2504,7 +2769,10 @@ fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) {
 fn drill_advance(state: &mut AppState, app: &AppWindow) {
     loop {
         let key = tree::position_key(&state.drill_chess);
-        let edges = state.db.get_repertoire_moves_from(&key, &state.drill_side).unwrap_or_default();
+        let edges = state
+            .db
+            .get_repertoire_moves_from(&key, &state.drill_side)
+            .unwrap_or_default();
         let (mine, theirs): (Vec<_>, Vec<_>) = edges.into_iter().partition(|e| e.is_my_move);
 
         let side_to_move_is_mine =
@@ -2516,8 +2784,10 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
                 app.set_drill_instructions(slint::SharedString::from("Line complete — well done!"));
                 return;
             }
-            app.set_drill_branch_info(slint::SharedString::from(
-                format!("{} accepted move(s) here", mine.len())));
+            app.set_drill_branch_info(slint::SharedString::from(format!(
+                "{} accepted move(s) here",
+                mine.len()
+            )));
             app.set_drill_instructions(slint::SharedString::from("Your move."));
             state.drill_expected = mine;
             return;
@@ -2529,21 +2799,43 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
             return;
         }
         let pick = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
-            .subsec_nanos() as usize % theirs.len();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as usize
+            % theirs.len();
         let mv = &theirs[pick];
         if let Ok(uci) = mv.uci.parse::<shakmaty::uci::Uci>() {
             if let Ok(m) = uci.to_move(&state.drill_chess) {
                 state.drill_chess.play_unchecked(&m);
                 let fen = shakmaty::fen::Fen::from_position(
-                    state.drill_chess.clone(), shakmaty::EnPassantMode::Legal).to_string();
+                    state.drill_chess.clone(),
+                    shakmaty::EnPassantMode::Legal,
+                )
+                .to_string();
                 app.set_board_pieces(slint::ModelRc::from(std::rc::Rc::new(
-                    slint::VecModel::from(fen_to_pieces(&fen)))));
+                    slint::VecModel::from(fen_to_pieces(&fen)),
+                )));
                 continue;
             }
         }
         app.set_drill_active(false);
         return;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fen_to_pieces;
+
+    #[test]
+    fn fen_to_pieces_preserves_piece_side_codes() {
+        let pieces = fen_to_pieces("r7/8/8/8/8/8/P7/K7 w - - 0 1");
+        let as_strings: Vec<String> = pieces.iter().map(|piece| piece.to_string()).collect();
+
+        assert_eq!(as_strings[0], "r");
+        assert_eq!(as_strings[48], "P");
+        assert_eq!(as_strings[56], "K");
+        assert_eq!(as_strings[63], "");
     }
 }
 
