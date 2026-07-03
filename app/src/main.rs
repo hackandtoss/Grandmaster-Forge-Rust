@@ -2449,7 +2449,7 @@ fn bot_take_turn(state: &mut AppState, app: &AppWindow) -> String {
         }
     };
 
-    let Ok(uci) = uci_str.parse::<Uci>() else { return format!("Bot produced bad move {uci_str}") };
+    let Ok(uci) = uci_str.parse::<Uci>() else { return format!("Bot produced bad move {uci_str} — game ended.") };
     let Ok(m) = uci.to_move(&state.play_chess) else {
         // Mock engine can emit illegal moves in arbitrary positions; end gracefully.
         return format!("Bot move {uci_str} not legal here — game ended.");
