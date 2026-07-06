@@ -105,6 +105,22 @@ pub fn grade_edge(
     )
 }
 
+/// Which side did the user play? Matches configured usernames, case-insensitive.
+pub fn user_side_for_game(white: &str, black: &str) -> Option<String> {
+    let names: Vec<String> = ["LICHESS_USERNAME", "CHESSCOM_USERNAME"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|s| s.to_lowercase())
+        .collect();
+    if names.iter().any(|n| n == &white.to_lowercase()) {
+        return Some("White".into());
+    }
+    if names.iter().any(|n| n == &black.to_lowercase()) {
+        return Some("Black".into());
+    }
+    None
+}
+
 /// YYYY-MM-DD for "now" (epoch-days, matching the app's existing date convention).
 pub fn local_now_str() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -257,6 +273,16 @@ mod tests {
         let failed = db.get_repertoire_move(id).unwrap().unwrap();
         assert_eq!(failed.srs_reps, 0);
         assert_eq!(failed.srs_due_date, "2026-07-02"); // reset to 1 day
+    }
+
+    #[test]
+    fn user_side_matches_env_usernames() {
+        // set_var affects the whole test process; keep every assertion in this one test
+        std::env::set_var("LICHESS_USERNAME", "hackandtoss");
+        std::env::set_var("CHESSCOM_USERNAME", "ElectricMindGames");
+        assert_eq!(user_side_for_game("HackAndToss", "opp"), Some("White".to_string()));
+        assert_eq!(user_side_for_game("opp", "electricmindgames"), Some("Black".to_string()));
+        assert_eq!(user_side_for_game("a", "b"), None);
     }
 
     #[test]
