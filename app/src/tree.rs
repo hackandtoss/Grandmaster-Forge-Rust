@@ -62,6 +62,26 @@ pub fn import_uci_line(
     Ok(new_edges)
 }
 
+/// Insert pre-walked PGN moves (parent/child fens already normalized). Returns NEW edge count.
+pub fn import_walked(
+    db: &mut SqliteStore,
+    walked: &[pgn_processor::WalkedMove],
+    side: &str,
+    source: &str,
+) -> Result<u32, String> {
+    let mut new_edges = 0u32;
+    for w in walked {
+        let mover_is_white = w.parent_fen.split_whitespace().nth(1) == Some("w");
+        let is_my_move = (side == "White") == mover_is_white;
+        let parent_id = db.ensure_repertoire_node(&w.parent_fen, side)?;
+        let child_id = db.ensure_repertoire_node(&w.child_fen, side)?;
+        let (_, was_new) =
+            db.insert_repertoire_move(parent_id, child_id, &w.uci, &w.san, is_my_move, source)?;
+        if was_new { new_edges += 1; }
+    }
+    Ok(new_edges)
+}
+
 /// Apply an SM-2 review to a repertoire edge and persist the new schedule.
 pub fn grade_edge(
     db: &mut SqliteStore,
@@ -205,6 +225,22 @@ mod tests {
         // so the second import adds 4 new edges too — but both funnel into ONE node:
         assert_eq!(n2, 4);
         // and from the shared final position, later continuations are shared.
+    }
+
+    #[test]
+    fn import_walked_inserts_edges_with_ownership() {
+        let mut db = mem_store();
+        let pgn = "[Event \"R\"]\n\n1. e4 e5 (1... c5) 2. Nf3 *";
+        let walked = pgn_processor::walk_pgn_variations(pgn).unwrap();
+        let n = import_walked(&mut db, &walked, "White", "pgn").unwrap();
+        assert_eq!(n, 4);
+        let start_edges = db.get_repertoire_moves_from(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "White").unwrap();
+        assert_eq!(start_edges.len(), 1); // e4, my move
+        assert!(start_edges[0].is_my_move);
+        let after_e4 = db.get_repertoire_moves_from(&walked[0].child_fen, "White").unwrap();
+        assert_eq!(after_e4.len(), 2); // e5 and c5, opponent moves
+        assert!(after_e4.iter().all(|e| !e.is_my_move));
     }
 
     #[test]

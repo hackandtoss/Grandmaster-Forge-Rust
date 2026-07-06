@@ -1,6 +1,7 @@
 pub mod games;
 pub mod puzzles;
 pub mod explorer;
+pub mod studies;
 
 pub struct LichessClient {
     http: reqwest::Client,
