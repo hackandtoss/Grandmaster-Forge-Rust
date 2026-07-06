@@ -7,6 +7,7 @@ mod tree;
 use db_manager::{GameRecord, PositionRecord, SqliteStore, TrainingEventRecord, TrainingStore};
 use engine_controller::{AnalysisConfig, StockfishEngine};
 use shakmaty::{CastlingMode, Chess, Position};
+use shakmaty::san::San;
 use shakmaty::uci::Uci;
 use slint::Model;
 use std::sync::{Arc, Mutex};
@@ -142,6 +143,25 @@ slint::slint! {
         // Drill branch info
         in-out property <string> drill-branch-info: "";
 
+        // Play-vs-bot state
+        in-out property <[string]> play-board-pieces: [
+            "♜", "♞", "♝", "♛", "♚", "♝", "♞", "♜",
+            "♟", "♟", "♟", "♟", "♟", "♟", "♟", "♟",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "♙", "♙", "♙", "♙", "♙", "♙", "♙", "♙",
+            "♖", "♘", "♗", "♕", "♔", "♗", "♘", "♖"
+        ];
+        in-out property <int> play-selected-square: -1;
+        in-out property <string> play-status: "Choose color and start a game.";
+        in-out property <string> play-summary: "";
+        in-out property <string> play-color: "White";
+        in-out property <int> play-elo: 1500;
+        in-out property <bool> play-active: false;
+        in-out property <string> play-book-state: "";
+
         // Callbacks
         callback select-screen(string);
         callback import-pgn(string);
@@ -166,6 +186,10 @@ slint::slint! {
         callback sync-studies(string);
         callback sync-chesscom();
         callback adopt-explorer(string);
+        callback play-new-game(string, float);
+        callback play-click-square(int);
+        callback play-resign();
+        callback play-review-game();
 
         HorizontalLayout {
             // Sidebar
@@ -216,6 +240,11 @@ slint::slint! {
                             text: "Import Lines";
                             active: root.active-screen == "import";
                             clicked => { root.select-screen("import"); }
+                        }
+                        SidebarButton {
+                            text: "Play vs Bot";
+                            active: root.active-screen == "play";
+                            clicked => { root.select-screen("play"); }
                         }
                     }
                 }
@@ -934,6 +963,73 @@ slint::slint! {
                     }
                     Text { text: root.import-status; color: #a78bfa; font-size: 13px; }
                 }
+
+                // 6. Play vs Bot Screen
+                if (root.active-screen == "play") : HorizontalLayout {
+                    spacing: 24px;
+                    // Board
+                    Rectangle {
+                        width: 360px; height: 360px;
+                        background: #1a1a1e; border-radius: 8px;
+                        border-color: #3f3f46; border-width: 2px;
+                        for index in 64: Rectangle {
+                            x: mod(index, 8) * 45px;
+                            y: floor(index / 8) * 45px;
+                            width: 45px; height: 45px;
+                            background: (root.play-selected-square == index)
+                                ? #fcd34d
+                                : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
+                            Text {
+                                text: root.play-board-pieces[index];
+                                font-size: 28px; color: #000000;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            TouchArea { clicked => { root.play-click-square(index); } }
+                        }
+                    }
+                    // Controls
+                    VerticalLayout {
+                        spacing: 12px; alignment: start;
+                        Text { text: "Play vs Book Bot"; color: #ffffff; font-size: 18px; font-weight: 700; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                width: 80px; height: 32px;
+                                background: root.play-color == "White" ? #6d28d9 : #27272a;
+                                border-radius: 6px;
+                                TouchArea { clicked => { root.play-color = "White"; } }
+                                Text { text: "White"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                width: 80px; height: 32px;
+                                background: root.play-color == "Black" ? #6d28d9 : #27272a;
+                                border-radius: 6px;
+                                TouchArea { clicked => { root.play-color = "Black"; } }
+                                Text { text: "Black"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Bot Elo:"; color: #a1a1aa; font-size: 13px; vertical-alignment: center; }
+                            elo-input := LineEdit { width: 80px; text: "1500"; }
+                        }
+                        Button {
+                            text: "New Game";
+                            clicked => { root.play-new-game(root.play-color, elo-input.text.to-float()); }
+                        }
+                        if (root.play-active) : Button {
+                            text: "Resign";
+                            clicked => { root.play-resign(); }
+                        }
+                        Text { text: root.play-book-state; color: #a78bfa; font-size: 13px; }
+                        Text { text: root.play-status; color: #e4e4e7; font-size: 13px; }
+                        Text { text: root.play-summary; color: #a1a1aa; font-size: 12px; wrap: word-wrap; width: 300px; }
+                        if (!root.play-active && root.play-summary != "") : Button {
+                            text: "Review This Game";
+                            clicked => { root.play-review-game(); }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1039,6 +1135,14 @@ struct AppState {
     builder_staged_uci: Vec<String>,
     builder_selected_sq: Option<usize>,
     builder_color: String,
+    // Play-vs-bot session
+    play_chess: Chess,
+    play_moves_uci: Vec<String>,
+    play_side: String,             // user's color: "White" | "Black"
+    play_session: Option<engine_controller::PlaySession>,
+    play_deviations: Vec<String>,
+    play_plies_in_book: u32,
+    play_left_book_at: Option<u32>,
 }
 
 fn main() {
@@ -1071,6 +1175,13 @@ fn main() {
         builder_staged_uci: Vec::new(),
         builder_selected_sq: None,
         builder_color: "White".to_string(),
+        play_chess: Chess::default(),
+        play_moves_uci: Vec::new(),
+        play_side: "White".to_string(),
+        play_session: None,
+        play_deviations: Vec::new(),
+        play_plies_in_book: 0,
+        play_left_book_at: None,
     }));
 
     let app = AppWindow::new().expect("failed to create Slint window");
@@ -2081,7 +2192,229 @@ fn main() {
         });
     }
 
+    // ── Play-vs-Bot callbacks ────────────────────────────────────────────────
+
+    // New game: reset session state; bot moves first when the user plays Black
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_play_new_game(move |color: slint::SharedString, elo: f32| {
+            let mut st = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            st.play_chess = Chess::default();
+            st.play_moves_uci.clear();
+            st.play_side = color.to_string();
+            st.play_session = None; // rebuilt lazily with the chosen Elo
+            st.play_deviations.clear();
+            st.play_plies_in_book = 0;
+            st.play_left_book_at = None;
+            app.set_play_elo(elo as i32);
+            app.set_play_active(true);
+            app.set_play_summary(slint::SharedString::from(""));
+            app.set_play_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")))));
+            let msg = if st.play_side == "Black" {
+                bot_take_turn(&mut st, &app) // bot is White, moves first
+            } else {
+                "Your move.".to_string()
+            };
+            app.set_play_status(slint::SharedString::from(msg));
+        });
+    }
+
+    // Two-click move entry: legality check, book-deviation grading, then bot reply
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_play_click_square(move |idx: i32| {
+            let mut st = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            if !app.get_play_active() { return; }
+            let sel = app.get_play_selected_square();
+            if sel == -1 { app.set_play_selected_square(idx); return; }
+            app.set_play_selected_square(-1);
+            let uci_try = format!("{}{}", index_to_square(sel as usize), index_to_square(idx as usize));
+
+            // Legality first (try promotion to queen as fallback).
+            let mv = uci_try.parse::<Uci>().ok().and_then(|u| u.to_move(&st.play_chess).ok())
+                .or_else(|| format!("{uci_try}q").parse::<Uci>().ok()
+                    .and_then(|u| u.to_move(&st.play_chess).ok()));
+            let Some(m) = mv else {
+                app.set_play_status(slint::SharedString::from("Illegal move."));
+                return;
+            };
+            let played_uci = Uci::from_move(&m, CastlingMode::Standard).to_string();
+
+            // Book check BEFORE playing: was this position in book, and did we deviate?
+            let key = tree::position_key(&st.play_chess);
+            let side = st.play_side.clone();
+            let my_edges: Vec<_> = st.db.get_repertoire_moves_from(&key, &side)
+                .unwrap_or_default().into_iter().filter(|e| e.is_my_move).collect();
+            if !my_edges.is_empty() {
+                if my_edges.iter().any(|e| e.uci == played_uci) {
+                    st.play_plies_in_book += 1;
+                } else {
+                    let today_days = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() / 86400;
+                    let expected: Vec<String> =
+                        my_edges.iter().map(|e| e.san.clone()).collect();
+                    for e in &my_edges {
+                        let _ = tree::grade_edge(&mut st.db, e, 1, today_days);
+                    }
+                    let move_no = st.play_moves_uci.len() / 2 + 1;
+                    st.play_deviations.push(format!(
+                        "Move {}: played {played_uci}, book expected {}",
+                        move_no,
+                        expected.join(" / ")
+                    ));
+                    if st.play_left_book_at.is_none() {
+                        st.play_left_book_at = Some(st.play_moves_uci.len() as u32);
+                    }
+                }
+            }
+
+            st.play_chess.play_unchecked(&m);
+            st.play_moves_uci.push(played_uci);
+            let fen = shakmaty::fen::Fen::from_position(
+                st.play_chess.clone(), shakmaty::EnPassantMode::Legal).to_string();
+            app.set_play_board_pieces(slint::ModelRc::from(Rc::new(
+                slint::VecModel::from(fen_to_pieces(&fen)))));
+
+            if st.play_chess.is_game_over() {
+                finish_play_game(&mut st, &app, "Game over");
+                return;
+            }
+            let msg = bot_take_turn(&mut st, &app);
+            let ended = msg.contains("ended") || msg.contains("Engine")
+                || st.play_chess.is_game_over();
+            app.set_play_status(slint::SharedString::from(msg));
+            if ended { finish_play_game(&mut st, &app, "Game over"); }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_play_resign(move || {
+            let mut st = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            finish_play_game(&mut st, &app, "Resigned");
+        });
+    }
+
+    // Send the finished bot game through the normal import/analysis pipeline.
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_play_review_game(move || {
+            let st = state.lock().unwrap();
+            let moves = st.play_moves_uci.clone();
+            let side = st.play_side.clone();
+            drop(st);
+            if moves.is_empty() { return; }
+            // Rebuild SAN movetext from UCI.
+            let mut pos = Chess::default();
+            let mut san_moves: Vec<String> = Vec::new();
+            for uci_str in &moves {
+                let Ok(uci) = uci_str.parse::<Uci>() else { break };
+                let Ok(m) = uci.to_move(&pos) else { break };
+                san_moves.push(San::from_move(&pos, &m).to_string());
+                pos.play_unchecked(&m);
+            }
+            let mut movetext = String::new();
+            for (i, san) in san_moves.iter().enumerate() {
+                if i % 2 == 0 { movetext.push_str(&format!("{}. ", i / 2 + 1)); }
+                movetext.push_str(san);
+                movetext.push(' ');
+            }
+            let (w, b) = if side == "White" { ("You", "Forge Bot") } else { ("Forge Bot", "You") };
+            let pgn = format!(
+                "[Event \"Bot Game\"]\n[White \"{w}\"]\n[Black \"{b}\"]\n[Date \"{}\"]\n\n{movetext}*",
+                tree::local_now_str().replace('-', ".")
+            );
+            if let Some(app) = app_weak.upgrade() {
+                app.invoke_import_pgn(slint::SharedString::from(pgn));
+                app.set_active_screen(slint::SharedString::from("review"));
+            }
+        });
+    }
+
     app.run().expect("failed to run Slint application");
+}
+
+/// Bot plays one move: from the user's book if possible, else via Stockfish PlaySession.
+/// Returns a status string for the UI.
+fn bot_take_turn(state: &mut AppState, app: &AppWindow) -> String {
+    if state.play_chess.is_game_over() {
+        return "Game over.".to_string();
+    }
+    let key = tree::position_key(&state.play_chess);
+    let edges = state.db.get_repertoire_moves_from(&key, &state.play_side).unwrap_or_default();
+    let book: Vec<_> = edges.into_iter().filter(|e| !e.is_my_move).collect();
+
+    let uci_str = if !book.is_empty() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as usize;
+        state.play_plies_in_book += 1;
+        app.set_play_book_state(slint::SharedString::from("In book (your prep)"));
+        book[nanos % book.len()].uci.clone()
+    } else {
+        if state.play_left_book_at.is_none() {
+            state.play_left_book_at = Some(state.play_moves_uci.len() as u32);
+        }
+        app.set_play_book_state(slint::SharedString::from("Out of book (Stockfish)"));
+        if state.play_session.is_none() {
+            let elo = app.get_play_elo().max(1320) as u32;
+            match engine_controller::PlaySession::new(
+                &state.stockfish_path,
+                engine_controller::PlayConfig { elo: Some(elo), movetime_ms: 400 },
+            ) {
+                Ok(s) => state.play_session = Some(s),
+                Err(e) => return format!("Engine unavailable — book-only mode ended the game. ({e})"),
+            }
+        }
+        match state.play_session.as_mut().unwrap().best_move_from(&state.play_moves_uci) {
+            Ok(m) => m,
+            Err(e) => return format!("Engine error: {e}"),
+        }
+    };
+
+    let Ok(uci) = uci_str.parse::<Uci>() else { return format!("Bot produced bad move {uci_str}") };
+    let Ok(m) = uci.to_move(&state.play_chess) else {
+        // Mock engine can emit illegal moves in arbitrary positions; end gracefully.
+        return format!("Bot move {uci_str} not legal here — game ended.");
+    };
+    state.play_chess.play_unchecked(&m);
+    state.play_moves_uci.push(uci_str.clone());
+    let fen = shakmaty::fen::Fen::from_position(
+        state.play_chess.clone(), shakmaty::EnPassantMode::Legal).to_string();
+    app.set_play_board_pieces(slint::ModelRc::from(std::rc::Rc::new(
+        slint::VecModel::from(fen_to_pieces(&fen)))));
+    format!("Bot played {uci_str}. Your move.")
+}
+
+/// End the bot game: build the summary and leave the moves for optional review.
+fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) {
+    app.set_play_active(false);
+    let total = state.play_moves_uci.len();
+    let mut summary = format!(
+        "{reason} after {total} plies. In book: {} of your moves.",
+        state.play_plies_in_book
+    );
+    if let Some(ply) = state.play_left_book_at {
+        summary.push_str(&format!(" Left book at ply {}.", ply + 1));
+    }
+    if state.play_deviations.is_empty() {
+        summary.push_str(" No deviations from your repertoire — clean prep!");
+    } else {
+        summary.push_str(&format!(
+            " Deviations (now due for review): {}",
+            state.play_deviations.join(" | ")
+        ));
+    }
+    app.set_play_summary(slint::SharedString::from(summary));
 }
 
 /// Insert a game + its per-ply positions (unanalyzed). Existing rows are untouched.
