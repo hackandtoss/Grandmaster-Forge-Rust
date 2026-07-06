@@ -17,6 +17,7 @@ engine_controller = { path = "../engine_controller" }
 pgn_processor = { path = "../pgn_processor" }
 mastery_ui = { path = "../mastery_ui" }
 lichess_client = { path = "../lichess_client" }
+chesscom_client = { path = "../chesscom_client" }
 shakmaty = "0.26"
 rusqlite = { version = "0.31", features = ["bundled"] }
 slint = "1.6"
