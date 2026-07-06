@@ -1,0 +1,185 @@
+use db_manager::SqliteStore;
+use shakmaty::fen::Fen;
+use shakmaty::san::San;
+use shakmaty::uci::Uci;
+use shakmaty::{CastlingMode, Chess, EnPassantMode, Position};
+
+/// Normalized FEN used as a repertoire-tree key.
+pub fn position_key(pos: &Chess) -> String {
+    let fen = Fen::from_position(pos.clone(), EnPassantMode::Legal).to_string();
+    db_manager::normalize_fen(&fen)
+}
+
+fn parse_position(fen: &str) -> Result<Chess, String> {
+    let parsed: Fen = fen.parse().map_err(|e| format!("bad FEN '{fen}': {e}"))?;
+    parsed
+        .into_position(CastlingMode::Standard)
+        .map_err(|e| format!("illegal position '{fen}': {e}"))
+}
+
+/// Insert one edge. Returns (edge_id, child_full_fen, was_new).
+pub fn add_move_edge(
+    db: &mut SqliteStore,
+    parent_full_fen: &str,
+    uci_str: &str,
+    side: &str,
+    source: &str,
+) -> Result<(i64, String, bool), String> {
+    let pos = parse_position(parent_full_fen)?;
+    let uci: Uci = uci_str.parse().map_err(|e| format!("bad UCI '{uci_str}': {e}"))?;
+    let m = uci.to_move(&pos).map_err(|e| format!("illegal move '{uci_str}': {e}"))?;
+    let san = San::from_move(&pos, &m).to_string();
+    let mover_is_white = pos.turn() == shakmaty::Color::White;
+    let is_my_move = (side == "White") == mover_is_white;
+    let parent_key = position_key(&pos);
+    let next = pos.play(&m).map_err(|e| format!("cannot play '{uci_str}': {e}"))?;
+    let child_fen = position_key(&next);
+
+    let parent_id = db.ensure_repertoire_node(&parent_key, side)?;
+    let child_id = db.ensure_repertoire_node(&child_fen, side)?;
+    let (edge_id, was_new) =
+        db.insert_repertoire_move(parent_id, child_id, uci_str, &san, is_my_move, source)?;
+    Ok((edge_id, child_fen, was_new))
+}
+
+/// Walk a UCI line from start_fen, inserting every move. Returns count of NEW edges.
+pub fn import_uci_line(
+    db: &mut SqliteStore,
+    start_fen: &str,
+    moves: &[String],
+    side: &str,
+    source: &str,
+) -> Result<u32, String> {
+    let mut fen = start_fen.to_string();
+    let mut new_edges = 0u32;
+    for uci in moves {
+        let (_, child, was_new) = add_move_edge(db, &fen, uci, side, source)?;
+        if was_new {
+            new_edges += 1;
+        }
+        fen = child;
+    }
+    Ok(new_edges)
+}
+
+/// One-time migration from opening_lines. Idempotent:
+/// skips when the tree already has rows or the legacy table is gone.
+pub fn migrate_legacy_lines(db: &mut SqliteStore) -> Result<u32, String> {
+    if db.repertoire_move_count()? > 0 || !db.opening_lines_table_exists() {
+        return Ok(0);
+    }
+    let lines = db.get_opening_lines("default_user")?;
+    let mut migrated = 0u32;
+    for line in &lines {
+        let mut fen = line.start_fen.clone();
+        for uci in &line.line_uci {
+            let (edge_id, child, _was_new) =
+                match add_move_edge(db, &fen, uci, &line.side, &line.source) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("migration: skipping bad move in line {}: {e}", line.id);
+                        break;
+                    }
+                };
+            // Copy the line's SM-2 state onto my-move edges; longest interval wins.
+            if let Some(existing) = db.get_repertoire_move(edge_id)? {
+                if existing.is_my_move && line.srs_interval > existing.srs_interval {
+                    db.update_repertoire_move_srs(
+                        edge_id,
+                        line.srs_interval,
+                        line.srs_ease,
+                        line.srs_reps,
+                        &line.srs_due_date,
+                    )?;
+                }
+            }
+            fen = child;
+        }
+        migrated += 1;
+    }
+    db.retire_opening_lines()?;
+    Ok(migrated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use db_manager::{OpeningLineRecord, SqliteStore, TrainingStore};
+
+    const START: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+    fn mem_store() -> SqliteStore {
+        let mut s = SqliteStore::new_in_memory().unwrap();
+        s.bootstrap().unwrap();
+        s.run_migrations().unwrap();
+        s
+    }
+
+    #[test]
+    fn add_move_edge_computes_san_child_and_ownership() {
+        let mut db = mem_store();
+        // White repertoire, White to move => my move
+        let (_id, child_fen, was_new) =
+            add_move_edge(&mut db, START, "e2e4", "White", "manual").unwrap();
+        assert!(was_new);
+        assert!(child_fen.starts_with("rnbqkbnr/pppppppp/8/8/4P3"));
+        let edges = db.get_repertoire_moves_from(START, "White").unwrap();
+        assert_eq!(edges[0].san, "e4");
+        assert!(edges[0].is_my_move);
+        // Black repertoire, White to move => opponent move
+        let (_id2, _cf2, _) = add_move_edge(&mut db, START, "e2e4", "Black", "manual").unwrap();
+        let edges_b = db.get_repertoire_moves_from(START, "Black").unwrap();
+        assert!(!edges_b[0].is_my_move);
+    }
+
+    #[test]
+    fn import_uci_line_walks_and_transposes() {
+        let mut db = mem_store();
+        let line: Vec<String> = ["e2e4", "e7e5", "g1f3"].iter().map(|s| s.to_string()).collect();
+        let new_edges = import_uci_line(&mut db, START, &line, "White", "pgn").unwrap();
+        assert_eq!(new_edges, 3);
+        // Re-import is a no-op
+        assert_eq!(import_uci_line(&mut db, START, &line, "White", "pgn").unwrap(), 0);
+        // Transposition: two move orders funnel into one final node
+        let a: Vec<String> = ["d2d4", "d7d5", "c2c4", "e7e6"].iter().map(|s| s.to_string()).collect();
+        let b: Vec<String> = ["c2c4", "e7e6", "d2d4", "d7d5"].iter().map(|s| s.to_string()).collect();
+        let n1 = import_uci_line(&mut db, START, &a, "White", "pgn").unwrap();
+        let n2 = import_uci_line(&mut db, START, &b, "White", "pgn").unwrap();
+        assert_eq!(n1, 4);
+        // Orders differ at every interior position; only the final position coincides,
+        // so the second import adds 4 new edges too — but both funnel into ONE node:
+        assert_eq!(n2, 4);
+        // and from the shared final position, later continuations are shared.
+    }
+
+    #[test]
+    fn migrate_legacy_lines_moves_srs_and_retires_table() {
+        let mut db = mem_store();
+        let line = OpeningLineRecord {
+            id: "L1".into(),
+            user_id: "default_user".into(),
+            opening_name: "Test".into(),
+            start_fen: START.into(),
+            line_uci: vec!["e2e4".into(), "e7e5".into()],
+            source: "builder".into(),
+            confidence: 0.5,
+            srs_interval: 6.0,
+            srs_ease: 2.6,
+            srs_reps: 2,
+            srs_due_date: "2026-07-10".into(),
+            side: "White".into(),
+        };
+        db.insert_opening_line(&line).unwrap();
+
+        let migrated = migrate_legacy_lines(&mut db).unwrap();
+        assert_eq!(migrated, 1);
+        assert!(!db.opening_lines_table_exists());
+        let edges = db.get_repertoire_moves_from(START, "White").unwrap();
+        assert_eq!(edges.len(), 1);
+        // my-move edge carries the line's SM-2 state
+        assert!((edges[0].srs_interval - 6.0).abs() < 0.01);
+        assert_eq!(edges[0].srs_due_date, "2026-07-10");
+        // second run is a no-op
+        assert_eq!(migrate_legacy_lines(&mut db).unwrap(), 0);
+    }
+}

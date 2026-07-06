@@ -2,6 +2,7 @@ mod srs;
 mod accuracy;
 mod weakness;
 mod scraper;
+mod tree;
 
 use db_manager::{GameRecord, OpeningLineRecord, PositionRecord, SqliteStore, TrainingEventRecord, TrainingStore};
 use engine_controller::{AnalysisConfig, StockfishEngine};
