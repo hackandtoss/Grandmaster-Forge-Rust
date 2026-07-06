@@ -165,6 +165,7 @@ slint::slint! {
         callback import-lines(string, string);
         callback sync-studies(string);
         callback sync-chesscom();
+        callback adopt-explorer(string);
 
         HorizontalLayout {
             // Sidebar
@@ -873,6 +874,20 @@ slint::slint! {
                                 vertical-alignment: center;
                             }
                         }
+
+                        // Adopt master lines from the current builder position
+                        Rectangle {
+                            height: 36px;
+                            background: #27272a;
+                            border-radius: 8px;
+                            TouchArea { clicked => { root.adopt-explorer(root.builder-color); } }
+                            Text {
+                                text: "Adopt Master Lines from Current Position";
+                                color: #a78bfa; font-size: 13px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                        Text { text: root.tree-status; color: #a1a1aa; font-size: 12px; }
                     }
                 }
 
@@ -1872,6 +1887,54 @@ fn main() {
                 }
                 Err(e) => app.set_import_status(slint::SharedString::from(format!("Import failed: {e}"))),
             }
+        });
+    }
+
+    // Adopt master lines from the builder's current position
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh = refresh_data.clone();
+        app.on_adopt_explorer(move |side: slint::SharedString| {
+            let app = app_weak.upgrade().unwrap();
+            let start_fen = app.get_builder_fen().to_string();
+            let side = side.to_string();
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            let refresh = refresh.clone();
+            std::thread::spawn(move || {
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_tree_status(slint::SharedString::from("Adopting master lines…"));
+                    }
+                });
+                let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
+                let client = lichess_client::LichessClient::new(&token);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let msg = match rt.block_on(scraper::adopt_explorer_lines(&client, &start_fen, &side, 8, 3)) {
+                    Ok(pairs) => {
+                        let mut st = state.lock().unwrap();
+                        let mut new_edges = 0u32;
+                        for (parent_fen, uci) in &pairs {
+                            if let Ok((_, _, was_new)) =
+                                tree::add_move_edge(&mut st.db, parent_fen, uci, &side, "explorer")
+                            {
+                                if was_new { new_edges += 1; }
+                            }
+                        }
+                        format!("Adopted {new_edges} new move(s) from master games.")
+                    }
+                    Err(e) => format!("Adopt failed: {e}"),
+                };
+                let aw = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = aw.upgrade() {
+                        app.set_tree_status(slint::SharedString::from(msg));
+                    }
+                    refresh();
+                });
+            });
         });
     }
 
