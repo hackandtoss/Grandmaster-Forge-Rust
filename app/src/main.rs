@@ -62,11 +62,21 @@ slint::slint! {
         }
     }
 
-    export component AppWindow inherits Window {
-        title: "Grandmaster Forge";
-        min-width: 1000px;
-        min-height: 700px;
-        background: #121214;
+    component ChessBoard inherits Rectangle {
+        in property <[string]> pieces: [
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+        ];
+        in property <int> selected-square: -1;
+        in property <color> highlight-color: #fcd34d;
+        in property <bool> interactive: true;
+        callback square-clicked(int);
 
         pure function piece-symbol(piece: string) -> string {
             return piece == "P" || piece == "p" ? "♟"
@@ -85,6 +95,58 @@ slint::slint! {
                     ? #00000000
                     : #111827;
         }
+
+        // Stay square: shrink to the smaller of whatever space the layout
+        // gives us, floored at today's fixed size, capped so it doesn't
+        // dwarf the surrounding panel on an ultrawide window.
+        property <length> board-size: max(360px, min(560px, min(root.width, root.height)));
+        property <length> cell-size: root.board-size / 8;
+
+        min-width: 360px;
+        min-height: 360px;
+        horizontal-stretch: 1;
+        vertical-stretch: 1;
+        background: #1a1a1e;
+        border-radius: 8px;
+        border-color: #3f3f46;
+        border-width: 2px;
+
+        Rectangle {
+            x: (parent.width - root.board-size) / 2;
+            y: (parent.height - root.board-size) / 2;
+            width: root.board-size;
+            height: root.board-size;
+
+            for index in 64: Rectangle {
+                x: mod(index, 8) * root.cell-size;
+                y: floor(index / 8) * root.cell-size;
+                width: root.cell-size;
+                height: root.cell-size;
+                background: (root.selected-square == index)
+                    ? root.highlight-color
+                    : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
+
+                Text {
+                    text: root.piece-symbol(root.pieces[index]);
+                    font-size: root.cell-size * 0.62;
+                    font-family: "Segoe UI Symbol";
+                    color: root.piece-color(root.pieces[index]);
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                if root.interactive : TouchArea {
+                    clicked => { root.square-clicked(index); }
+                }
+            }
+        }
+    }
+
+    export component AppWindow inherits Window {
+        title: "Grandmaster Forge";
+        min-width: 1000px;
+        min-height: 700px;
+        background: #121214;
 
         // Properties for dashboard
         in-out property <string> rec-mode: "ReviewRecentGame";
@@ -511,41 +573,13 @@ slint::slint! {
                     // Interactive Chess Board and Drill View (Right Column)
                     VerticalLayout {
                         spacing: 16px;
-                        alignment: center;
+                        horizontal-stretch: 1;
 
                         // Chess board container
-                        Rectangle {
-                            width: 360px;
-                            height: 360px;
-                            background: #1a1a1e;
-                            border-radius: 8px;
-                            border-color: #3f3f46;
-                            border-width: 2px;
-
-                            for index in 64: Rectangle {
-                                x: mod(index, 8) * 45px;
-                                y: floor(index / 8) * 45px;
-                                width: 45px;
-                                height: 45px;
-                                background: (root.board-selected-square == index)
-                                    ? #fcd34d
-                                    : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
-
-                                Text {
-                                    text: root.piece-symbol(root.board-pieces[index]);
-                                    font-size: 28px;
-                                    font-family: "Segoe UI Symbol";
-                                    color: root.piece-color(root.board-pieces[index]);
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-
-                                TouchArea {
-                                    clicked => {
-                                        root.click-board-square(index);
-                                    }
-                                }
-                            }
+                        ChessBoard {
+                            pieces: root.board-pieces;
+                            selected-square: root.board-selected-square;
+                            square-clicked(index) => { root.click-board-square(index); }
                         }
 
                         // Drill Controls
@@ -553,7 +587,7 @@ slint::slint! {
                             background: #1a1a1e;
                             border-radius: 8px;
                             padding: 16px;
-                            width: 360px;
+                            min-width: 360px;
 
                             VerticalLayout {
                                 spacing: 12px;
@@ -669,32 +703,11 @@ slint::slint! {
                         // Board View
                         VerticalLayout {
                             spacing: 12px;
-                            alignment: center;
+                            horizontal-stretch: 1;
 
-                            Rectangle {
-                                width: 360px;
-                                height: 360px;
-                                background: #1a1a1e;
-                                border-radius: 8px;
-                                border-color: #3f3f46;
-                                border-width: 2px;
-
-                                for index in 64: Rectangle {
-                                    x: mod(index, 8) * 45px;
-                                    y: floor(index / 8) * 45px;
-                                    width: 45px;
-                                    height: 45px;
-                                    background: (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
-
-                                    Text {
-                                        text: root.piece-symbol(root.board-pieces[index]);
-                                        font-size: 28px;
-                                        font-family: "Segoe UI Symbol";
-                                        color: root.piece-color(root.board-pieces[index]);
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
+                            ChessBoard {
+                                pieces: root.board-pieces;
+                                interactive: false;
                             }
 
                             // Engine Eval Block
@@ -702,7 +715,7 @@ slint::slint! {
                                 background: #1a1a1e;
                                 border-radius: 8px;
                                 padding: 12px;
-                                width: 360px;
+                                min-width: 360px;
 
                                 VerticalLayout {
                                     spacing: 4px;
@@ -823,34 +836,11 @@ slint::slint! {
                         }
 
                         // 8×8 board
-                        Rectangle {
-                            width: 360px;
-                            height: 360px;
-                            background: #1a1a1e;
-                            border-radius: 8px;
-                            border-color: #3f3f46;
-                            border-width: 2px;
-
-                            for index in 64: Rectangle {
-                                x: mod(index, 8) * 45px;
-                                y: floor(index / 8) * 45px;
-                                width: 45px;
-                                height: 45px;
-                                background: (root.builder-selected-square == index)
-                                    ? #7c3aed
-                                    : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
-                                Text {
-                                    text: root.piece-symbol(root.builder-board-pieces[index]);
-                                    font-size: 28px;
-                                    font-family: "Segoe UI Symbol";
-                                    color: root.piece-color(root.builder-board-pieces[index]);
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                                TouchArea {
-                                    clicked => { root.builder-click-square(index); }
-                                }
-                            }
+                        ChessBoard {
+                            pieces: root.builder-board-pieces;
+                            selected-square: root.builder-selected-square;
+                            highlight-color: #7c3aed;
+                            square-clicked(index) => { root.builder-click-square(index); }
                         }
 
                         // Undo / Reset buttons
@@ -987,26 +977,10 @@ slint::slint! {
                 if (root.active-screen == "play") : HorizontalLayout {
                     spacing: 24px;
                     // Board
-                    Rectangle {
-                        width: 360px; height: 360px;
-                        background: #1a1a1e; border-radius: 8px;
-                        border-color: #3f3f46; border-width: 2px;
-                        for index in 64: Rectangle {
-                            x: mod(index, 8) * 45px;
-                            y: floor(index / 8) * 45px;
-                            width: 45px; height: 45px;
-                            background: (root.play-selected-square == index)
-                                ? #fcd34d
-                                : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
-                            Text {
-                                text: root.piece-symbol(root.play-board-pieces[index]);
-                                font-size: 28px;
-                                font-family: "Segoe UI Symbol";
-                                color: root.piece-color(root.play-board-pieces[index]);
-                                horizontal-alignment: center; vertical-alignment: center;
-                            }
-                            TouchArea { clicked => { root.play-click-square(index); } }
-                        }
+                    ChessBoard {
+                        pieces: root.play-board-pieces;
+                        selected-square: root.play-selected-square;
+                        square-clicked(index) => { root.play-click-square(index); }
                     }
                     // Controls
                     VerticalLayout {
