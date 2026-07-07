@@ -6,6 +6,7 @@ mod weakness;
 
 use db_manager::{GameRecord, PositionRecord, SqliteStore, TrainingEventRecord, TrainingStore};
 use engine_controller::{AnalysisConfig, StockfishEngine};
+use shakmaty::san::San;
 use shakmaty::uci::Uci;
 use shakmaty::{CastlingMode, Chess, Position};
 use slint::Model;
@@ -1091,6 +1092,100 @@ fn score_to_centipawns(score: engine_controller::Score) -> i32 {
             }
         }
     }
+}
+
+fn estimated_elo(accuracy: f32) -> i32 {
+    (((800.0 + accuracy * 17.2) / 50.0).round() * 50.0) as i32
+}
+
+fn game_review_summary(accuracy: Option<f32>, classes: &[&str]) -> String {
+    let count = |label: &str| classes.iter().filter(|&&class| class == label).count();
+    let accuracy_text = match accuracy {
+        Some(value) => format!("Accuracy {:.0}% | Est. Elo {}", value, estimated_elo(value)),
+        None => "Accuracy pending | Est. Elo pending".to_string(),
+    };
+    format!(
+        "{accuracy_text} | Book {} | Blunder {} | Mistake {} | Miss {} | Good {} | Excellent {} | Best {} | Great {} | Brilliant {}",
+        count("Book"),
+        count("Blunder"),
+        count("Mistake"),
+        count("Miss"),
+        count("Good"),
+        count("Excellent"),
+        count("Best"),
+        count("Great"),
+        count("Brilliant"),
+    )
+}
+
+/// Determine a finished bot game's PGN result tag and a user-facing header,
+/// from the user's perspective (`side` is `state.play_side`).
+fn bot_game_outcome(chess: &Chess, side: &str, resigned: bool) -> (&'static str, &'static str) {
+    if resigned {
+        let tag = if side == "White" { "0-1" } else { "1-0" };
+        return (tag, "Forge Bot won");
+    }
+    match chess.outcome() {
+        Some(shakmaty::Outcome::Decisive { winner }) => {
+            let tag = if winner == shakmaty::Color::White { "1-0" } else { "0-1" };
+            let user_won = (winner == shakmaty::Color::White) == (side == "White");
+            let header = if user_won { "You beat Forge Bot!" } else { "Forge Bot won" };
+            (tag, header)
+        }
+        Some(shakmaty::Outcome::Draw) => ("1/2-1/2", "Draw"),
+        None => ("*", "Game over"),
+    }
+}
+
+/// Rebuild a bot game's PGN (SAN movetext) from its recorded UCI moves.
+fn build_bot_game_pgn(moves: &[String], side: &str, result_tag: &str) -> Option<String> {
+    if moves.is_empty() {
+        return None;
+    }
+    let mut pos = Chess::default();
+    let mut san_moves: Vec<String> = Vec::new();
+    for uci_str in moves {
+        let Ok(uci) = uci_str.parse::<Uci>() else { break };
+        let Ok(m) = uci.to_move(&pos) else { break };
+        san_moves.push(San::from_move(&pos, &m).to_string());
+        pos.play_unchecked(&m);
+    }
+    let mut movetext = String::new();
+    for (i, san) in san_moves.iter().enumerate() {
+        if i % 2 == 0 {
+            movetext.push_str(&format!("{}. ", i / 2 + 1));
+        }
+        movetext.push_str(san);
+        movetext.push(' ');
+    }
+    let user_name = std::env::var("LICHESS_USERNAME")
+        .or_else(|_| std::env::var("CHESSCOM_USERNAME"))
+        .unwrap_or_else(|_| "You".to_string());
+    let (w, b) = if side == "White" {
+        (user_name.as_str(), "Forge Bot")
+    } else {
+        ("Forge Bot", user_name.as_str())
+    };
+    Some(format!(
+        "[Event \"Bot Game\"]\n[White \"{w}\"]\n[Black \"{b}\"]\n[Date \"{}\"]\n[Round \"{}\"]\n\n{movetext}{result_tag}",
+        tree::local_now_str().replace('-', "."),
+        uuid_now()
+    ))
+}
+
+fn side_to_move_label(fen: &str) -> &'static str {
+    if fen.split_whitespace().nth(1) == Some("b") {
+        "Black"
+    } else {
+        "White"
+    }
+}
+
+fn is_book_move(db: &SqliteStore, fen: &str, played_move: &str) -> bool {
+    db.get_repertoire_moves_from(fen, side_to_move_label(fen))
+        .unwrap_or_default()
+        .iter()
+        .any(|edge| edge.uci == played_move)
 }
 
 fn find_stockfish_path() -> String {
@@ -2619,34 +2714,11 @@ fn main() {
             let st = state.lock().unwrap();
             let moves = st.play_moves_uci.clone();
             let side = st.play_side.clone();
+            let (result_tag, _) = bot_game_outcome(&st.play_chess, &side, false);
             drop(st);
-            if moves.is_empty() { return; }
-            // Rebuild SAN movetext from UCI.
-            use shakmaty::{Chess, Position};
-            use shakmaty::san::San;
-            let mut pos = Chess::default();
-            let mut san_moves: Vec<String> = Vec::new();
-            for uci_str in &moves {
-                let Ok(uci) = uci_str.parse::<Uci>() else { break };
-                let Ok(m) = uci.to_move(&pos) else { break };
-                san_moves.push(San::from_move(&pos, &m).to_string());
-                pos.play_unchecked(&m);
-            }
-            let mut movetext = String::new();
-            for (i, san) in san_moves.iter().enumerate() {
-                if i % 2 == 0 { movetext.push_str(&format!("{}. ", i / 2 + 1)); }
-                movetext.push_str(san);
-                movetext.push(' ');
-            }
-            let user_name = std::env::var("LICHESS_USERNAME")
-                .or_else(|_| std::env::var("CHESSCOM_USERNAME"))
-                .unwrap_or_else(|_| "You".to_string());
-            let (w, b) = if side == "White" { (user_name.as_str(), "Forge Bot") } else { ("Forge Bot", user_name.as_str()) };
-            let pgn = format!(
-                "[Event \"Bot Game\"]\n[White \"{w}\"]\n[Black \"{b}\"]\n[Date \"{}\"]\n[Round \"{}\"]\n\n{movetext}*",
-                tree::local_now_str().replace('-', "."),
-                uuid_now()
-            );
+            let Some(pgn) = build_bot_game_pgn(&moves, &side, result_tag) else {
+                return;
+            };
             if let Some(app) = app_weak.upgrade() {
                 app.invoke_import_pgn(slint::SharedString::from(pgn));
                 app.set_active_screen(slint::SharedString::from("review"));
@@ -2820,7 +2892,8 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
 
 #[cfg(test)]
 mod tests {
-    use super::fen_to_pieces;
+    use super::{bot_game_outcome, build_bot_game_pgn, fen_to_pieces, game_review_summary, sk_fen};
+    use shakmaty::{CastlingMode, Chess};
 
     #[test]
     fn fen_to_pieces_preserves_piece_side_codes() {
@@ -2831,6 +2904,88 @@ mod tests {
         assert_eq!(as_strings[48], "P");
         assert_eq!(as_strings[56], "K");
         assert_eq!(as_strings[63], "");
+    }
+
+    #[test]
+    fn game_review_summary_lists_accuracy_elo_and_move_counts() {
+        let summary = game_review_summary(
+            Some(87.4),
+            &[
+                "Book",
+                "Blunder",
+                "Mistake",
+                "Miss",
+                "Good",
+                "Excellent",
+                "Best",
+                "Great",
+                "Brilliant",
+            ],
+        );
+
+        assert!(summary.contains("Accuracy 87%"));
+        assert!(summary.contains("Est. Elo 2300"));
+        assert!(summary.contains("Book 1"));
+        assert!(summary.contains("Blunder 1"));
+        assert!(summary.contains("Mistake 1"));
+        assert!(summary.contains("Miss 1"));
+        assert!(summary.contains("Good 1"));
+        assert!(summary.contains("Excellent 1"));
+        assert!(summary.contains("Best 1"));
+        assert!(summary.contains("Great 1"));
+        assert!(summary.contains("Brilliant 1"));
+    }
+
+    #[test]
+    fn bot_game_outcome_reports_win_from_the_users_perspective() {
+        // Fool's mate: 1. f3 e5 2. g4 Qh4# — White is checkmated.
+        let chess: Chess = "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 3"
+            .parse::<sk_fen::Fen>()
+            .unwrap()
+            .into_position(CastlingMode::Standard)
+            .unwrap();
+
+        let (tag, header) = bot_game_outcome(&chess, "White", false);
+        assert_eq!(tag, "0-1");
+        assert_eq!(header, "Forge Bot won");
+
+        let (tag, header) = bot_game_outcome(&chess, "Black", false);
+        assert_eq!(tag, "0-1");
+        assert_eq!(header, "You beat Forge Bot!");
+    }
+
+    #[test]
+    fn bot_game_outcome_resignation_always_credits_the_other_side() {
+        let chess = Chess::default();
+
+        let (tag, header) = bot_game_outcome(&chess, "White", true);
+        assert_eq!(tag, "0-1");
+        assert_eq!(header, "Forge Bot won");
+
+        let (tag, header) = bot_game_outcome(&chess, "Black", true);
+        assert_eq!(tag, "1-0");
+        assert_eq!(header, "Forge Bot won");
+    }
+
+    #[test]
+    fn bot_game_outcome_unfinished_position_is_unresolved() {
+        let chess = Chess::default();
+        let (tag, header) = bot_game_outcome(&chess, "White", false);
+        assert_eq!(tag, "*");
+        assert_eq!(header, "Game over");
+    }
+
+    #[test]
+    fn build_bot_game_pgn_embeds_the_real_result_tag() {
+        let moves = vec!["e2e4".to_string(), "e7e5".to_string()];
+        let pgn = build_bot_game_pgn(&moves, "White", "1-0").unwrap();
+        assert!(pgn.contains("1. e4 e5 1-0"));
+        assert!(!pgn.trim_end().ends_with('*'));
+    }
+
+    #[test]
+    fn build_bot_game_pgn_returns_none_for_an_empty_game() {
+        assert!(build_bot_game_pgn(&[], "White", "*").is_none());
     }
 }
 
