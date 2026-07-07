@@ -10,6 +10,8 @@ use shakmaty::san::San;
 use shakmaty::uci::Uci;
 use shakmaty::{CastlingMode, Chess, Position};
 use slint::Model;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -156,6 +158,104 @@ slint::slint! {
         }
     }
 
+    component GameReviewBrief inherits Rectangle {
+        in property <string> result-text;
+        in property <bool> ready;
+        in property <string> status-text;
+        in property <string> accuracy-text;
+        in property <[ReviewStatEntry]> stats;
+        callback review-clicked();
+        callback close-clicked();
+
+        background: #000000aa;
+
+        Rectangle {
+            width: 380px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #1a1a1e;
+            border-radius: 12px;
+            border-color: #3f3f46;
+            border-width: 1px;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    alignment: end;
+                    Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        Text {
+                            text: "✕";
+                            color: #a1a1aa;
+                            font-size: 16px;
+                        }
+                        TouchArea {
+                            clicked => { root.close-clicked(); }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.result-text;
+                    color: #ffffff;
+                    font-size: 20px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                }
+
+                if !root.ready : Text {
+                    text: root.status-text;
+                    color: #a78bfa;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+
+                if root.ready : Text {
+                    text: root.accuracy-text;
+                    color: #e4e4e7;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
+
+                if root.ready : HorizontalLayout {
+                    spacing: 8px;
+                    alignment: center;
+                    for stat in root.stats: Rectangle {
+                        background: #27272a;
+                        border-radius: 6px;
+                        width: 72px;
+                        height: 56px;
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: stat.count;
+                                color: #ffffff;
+                                font-size: 18px;
+                                font-weight: 800;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: stat.label;
+                                color: #a1a1aa;
+                                font-size: 10px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                if root.ready : Button {
+                    text: "Game Review";
+                    clicked => { root.review-clicked(); }
+                }
+            }
+        }
+    }
+
     export component AppWindow inherits Window {
         title: "Grandmaster Forge";
         min-width: 1000px;
@@ -174,12 +274,6 @@ slint::slint! {
         in-out property <[GameEntry]> games: [];
         in-out property <[OpeningLineEntry]> opening-lines: [];
         in-out property <[HistoryEntry]> history: [];
-        // Exists only to force Slint's codegen to emit the ReviewStatEntry Rust
-        // type — Slint only generates bindings for structs referenced somewhere
-        // in the markup, and nothing else references this one yet. Task 5 removes
-        // this once it adds the real `game-review-stats` property that serves
-        // this purpose for real.
-        in-out property <[ReviewStatEntry]> review-stat-entries-codegen-anchor: [];
 
         // Active screen: "dashboard", "repertoire", "review"
         in-out property <string> active-screen: "dashboard";
@@ -197,7 +291,12 @@ slint::slint! {
         in-out property <string> selected-game-summary: "Import or select a game to review.";
         in-out property <string> review-status: "";
         in-out property <bool> show-game-review-brief: false;
+        in-out property <string> game-review-game-id: "";
         in-out property <string> game-review-result-text: "";
+        in-out property <string> game-review-accuracy-text: "";
+        in-out property <[ReviewStatEntry]> game-review-stats: [];
+        callback game-review-open();
+        callback game-review-close();
 
         // Interactive board pieces (64 strings)
         in-out property <[string]> board-pieces: [
@@ -1058,6 +1157,18 @@ slint::slint! {
                             clicked => { root.play-review-game(); }
                         }
                     }
+                }
+
+                if root.show-game-review-brief : GameReviewBrief {
+                    width: 100%;
+                    height: 100%;
+                    result-text: root.game-review-result-text;
+                    ready: root.game-review-stats.length > 0 || root.game-review-accuracy-text != "";
+                    status-text: root.review-status;
+                    accuracy-text: root.game-review-accuracy-text;
+                    stats: root.game-review-stats;
+                    review-clicked => { root.game-review-open(); }
+                    close-clicked => { root.game-review-close(); }
                 }
             }
         }
@@ -2574,6 +2685,27 @@ fn main() {
         });
     }
 
+    {
+        let app_weak = app_weak.clone();
+        app.on_game_review_close(move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_show_game_review_brief(false);
+            }
+        });
+    }
+
+    {
+        let app_weak = app_weak.clone();
+        app.on_game_review_open(move || {
+            if let Some(app) = app_weak.upgrade() {
+                let game_id = app.get_game_review_game_id();
+                app.set_active_screen(slint::SharedString::from("review"));
+                app.invoke_select_game(game_id);
+                app.set_show_game_review_brief(false);
+            }
+        });
+    }
+
     // Send the finished bot game through the normal import/analysis pipeline.
     {
         let state = state.clone();
@@ -2704,9 +2836,20 @@ fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) -> Opti
 
     let (result_tag, header) =
         bot_game_outcome(&state.play_chess, &state.play_side, reason == "Resigned");
-    app.set_game_review_result_text(slint::SharedString::from(header));
-    app.set_show_game_review_brief(true);
-    app.set_review_status(slint::SharedString::from("Analyzing with Stockfish..."));
+    // A 0-move game has nothing for `build_bot_game_pgn` to return (see below)
+    // and thus nothing for the background analysis thread to ever populate —
+    // opening the Brief here would leave it permanently stuck on "Analyzing…".
+    // Only open it when there's an actual game to analyze.
+    if !state.play_moves_uci.is_empty() {
+        app.set_game_review_result_text(slint::SharedString::from(header));
+        app.set_show_game_review_brief(true);
+        app.set_game_review_game_id(slint::SharedString::from(""));
+        app.set_game_review_stats(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+            Vec::<ReviewStatEntry>::new(),
+        ))));
+        app.set_game_review_accuracy_text(slint::SharedString::from(""));
+        app.set_review_status(slint::SharedString::from("Analyzing with Stockfish..."));
+    }
 
     build_bot_game_pgn(&state.play_moves_uci, &state.play_side, result_tag)
 }
@@ -3002,11 +3145,48 @@ fn import_and_analyze_pgn(
             }
         }
 
+        let updated_positions = {
+            let state = state_thread.lock().unwrap();
+            state
+                .db
+                .get_positions_for_game(&game_id_thread)
+                .unwrap_or_default()
+        };
+        let class_names: Vec<&str> = updated_positions
+            .iter()
+            .filter_map(|pos| pos.mistake_class.as_deref())
+            .collect();
+        let stats = review_stat_entries(&class_names);
+        let accuracy = {
+            let state = state_thread.lock().unwrap();
+            state
+                .db
+                .conn
+                .query_row(
+                    "SELECT accuracy_overall FROM games WHERE id = ?1",
+                    [game_id_thread.as_str()],
+                    |row| row.get::<_, Option<f64>>(0),
+                )
+                .ok()
+                .flatten()
+                .map(|value| value as f32)
+        };
+        let accuracy_text = accuracy_summary_text(accuracy);
+
         // Trigger UI refresh
         let _ = slint::invoke_from_event_loop(move || {
             refresh_thread();
             if let Some(app) = app_weak_thread.upgrade() {
-                app.invoke_select_game(slint::SharedString::from(game_id_thread));
+                app.invoke_select_game(slint::SharedString::from(game_id_thread.clone()));
+                if app.get_show_game_review_brief() && app.get_game_review_game_id().is_empty() {
+                    // First population right after auto-trigger: record which
+                    // game this open brief refers to.
+                    app.set_game_review_game_id(slint::SharedString::from(game_id_thread));
+                }
+                app.set_game_review_stats(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                    stats,
+                ))));
+                app.set_game_review_accuracy_text(slint::SharedString::from(accuracy_text));
             }
         });
     });
