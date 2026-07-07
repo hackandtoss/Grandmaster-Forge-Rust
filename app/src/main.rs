@@ -102,8 +102,16 @@ slint::slint! {
         property <length> board-size: max(360px, min(560px, min(root.width, root.height)));
         property <length> cell-size: root.board-size / 8;
 
+        // max-width/max-height mirror the 560px soft cap in board-size above.
+        // Without these, this root Rectangle (not just the inner checkerboard)
+        // has no upper bound, so a call site that places ChessBoard directly in
+        // a HorizontalLayout with a non-stretchy sibling (e.g. Play vs Bot) would
+        // let this panel claim all surplus width on an ultrawide window, growing
+        // into a mostly-empty box far past the visible 560px grid.
         min-width: 360px;
         min-height: 360px;
+        max-width: 560px;
+        max-height: 560px;
         horizontal-stretch: 1;
         vertical-stretch: 1;
         background: #1a1a1e;
@@ -587,7 +595,12 @@ slint::slint! {
                             background: #1a1a1e;
                             border-radius: 8px;
                             padding: 16px;
+                            // Bounded to match ChessBoard's own soft cap so this
+                            // column can't claim unbounded width on an ultrawide
+                            // window (and, in turn, so the outer HorizontalLayout
+                            // can't starve its sibling column of surplus space).
                             min-width: 360px;
+                            max-width: 560px;
 
                             VerticalLayout {
                                 spacing: 12px;
@@ -715,7 +728,12 @@ slint::slint! {
                                 background: #1a1a1e;
                                 border-radius: 8px;
                                 padding: 12px;
+                                // Bounded to match ChessBoard's own soft cap so this
+                                // column can't claim unbounded width on an ultrawide
+                                // window (and, in turn, so the outer HorizontalLayout
+                                // can't starve its sibling column of surplus space).
                                 min-width: 360px;
+                                max-width: 560px;
 
                                 VerticalLayout {
                                     spacing: 4px;
