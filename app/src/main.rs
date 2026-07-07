@@ -41,6 +41,11 @@ slint::slint! {
         date: string,
     }
 
+    struct ReviewStatEntry {
+        label: string,
+        count: int,
+    }
+
     component SidebarButton inherits Rectangle {
         in property <string> text;
         in property <bool> active;
@@ -169,6 +174,12 @@ slint::slint! {
         in-out property <[GameEntry]> games: [];
         in-out property <[OpeningLineEntry]> opening-lines: [];
         in-out property <[HistoryEntry]> history: [];
+        // Exists only to force Slint's codegen to emit the ReviewStatEntry Rust
+        // type — Slint only generates bindings for structs referenced somewhere
+        // in the markup, and nothing else references this one yet. Task 5 removes
+        // this once it adds the real `game-review-stats` property that serves
+        // this purpose for real.
+        in-out property <[ReviewStatEntry]> review-stat-entries-codegen-anchor: [];
 
         // Active screen: "dashboard", "repertoire", "review"
         in-out property <string> active-screen: "dashboard";
@@ -1098,14 +1109,18 @@ fn estimated_elo(accuracy: f32) -> i32 {
     (((800.0 + accuracy * 17.2) / 50.0).round() * 50.0) as i32
 }
 
-fn game_review_summary(accuracy: Option<f32>, classes: &[&str]) -> String {
-    let count = |label: &str| classes.iter().filter(|&&class| class == label).count();
-    let accuracy_text = match accuracy {
+fn accuracy_summary_text(accuracy: Option<f32>) -> String {
+    match accuracy {
         Some(value) => format!("Accuracy {:.0}% | Est. Elo {}", value, estimated_elo(value)),
         None => "Accuracy pending | Est. Elo pending".to_string(),
-    };
+    }
+}
+
+fn game_review_summary(accuracy: Option<f32>, classes: &[&str]) -> String {
+    let count = |label: &str| classes.iter().filter(|&&class| class == label).count();
     format!(
-        "{accuracy_text} | Book {} | Blunder {} | Mistake {} | Miss {} | Good {} | Excellent {} | Best {} | Great {} | Brilliant {}",
+        "{} | Book {} | Blunder {} | Mistake {} | Miss {} | Good {} | Excellent {} | Best {} | Great {} | Brilliant {}",
+        accuracy_summary_text(accuracy),
         count("Book"),
         count("Blunder"),
         count("Mistake"),
@@ -1116,6 +1131,29 @@ fn game_review_summary(accuracy: Option<f32>, classes: &[&str]) -> String {
         count("Great"),
         count("Brilliant"),
     )
+}
+
+/// Non-zero move-classification counts, in a fixed display order, for the
+/// Game Review Brief's stat grid. Mirrors the 9 engine_controller::MoveClass
+/// variants exactly (there is no "Perfect" class).
+fn review_stat_entries(classes: &[&str]) -> Vec<ReviewStatEntry> {
+    const ORDER: [&str; 9] = [
+        "Best", "Book", "Blunder", "Brilliant", "Excellent", "Good", "Great", "Miss", "Mistake",
+    ];
+    ORDER
+        .iter()
+        .filter_map(|&label| {
+            let count = classes.iter().filter(|&&class| class == label).count();
+            if count == 0 {
+                None
+            } else {
+                Some(ReviewStatEntry {
+                    label: slint::SharedString::from(label),
+                    count: count as i32,
+                })
+            }
+        })
+        .collect()
 }
 
 /// Determine a finished bot game's PGN result tag and a user-facing header,
@@ -2892,7 +2930,10 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
 
 #[cfg(test)]
 mod tests {
-    use super::{bot_game_outcome, build_bot_game_pgn, fen_to_pieces, game_review_summary, sk_fen};
+    use super::{
+        accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, fen_to_pieces,
+        game_review_summary, review_stat_entries, sk_fen,
+    };
     use shakmaty::{CastlingMode, Chess};
 
     #[test]
@@ -2986,6 +3027,40 @@ mod tests {
     #[test]
     fn build_bot_game_pgn_returns_none_for_an_empty_game() {
         assert!(build_bot_game_pgn(&[], "White", "*").is_none());
+    }
+
+    #[test]
+    fn review_stat_entries_lists_only_nonzero_categories_in_display_order() {
+        let entries = review_stat_entries(&["Book", "Book", "Blunder", "Best"]);
+        let as_pairs: Vec<(String, i32)> = entries
+            .into_iter()
+            .map(|e| (e.label.to_string(), e.count))
+            .collect();
+        assert_eq!(
+            as_pairs,
+            vec![
+                ("Best".to_string(), 1),
+                ("Book".to_string(), 2),
+                ("Blunder".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn review_stat_entries_empty_for_no_classified_moves() {
+        assert!(review_stat_entries(&[]).is_empty());
+    }
+
+    #[test]
+    fn accuracy_summary_text_matches_existing_format() {
+        assert_eq!(
+            accuracy_summary_text(Some(87.4)),
+            "Accuracy 87% | Est. Elo 2300"
+        );
+        assert_eq!(
+            accuracy_summary_text(None),
+            "Accuracy pending | Est. Elo pending"
+        );
     }
 }
 
