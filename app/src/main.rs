@@ -194,6 +194,10 @@ slint::slint! {
         in-out property <int> selected-move-index: -1;
         in-out property <string> selected-move-eval: "";
         in-out property <string> selected-move-best: "";
+        in-out property <string> selected-game-summary: "Import or select a game to review.";
+        in-out property <string> review-status: "";
+        in-out property <bool> show-game-review-brief: false;
+        in-out property <string> game-review-result-text: "";
 
         // Interactive board pieces (64 strings)
         in-out property <[string]> board-pieces: [
@@ -1756,198 +1760,10 @@ fn main() {
     // Wiring PGN Ingestion & Background analysis
     {
         let state = state.clone();
+        let app_weak = app_weak.clone();
         let refresh_data_cp = refresh_data.clone();
         app.on_import_pgn(move |pgn_text: slint::SharedString| {
-            if pgn_text.trim().is_empty() {
-                return;
-            }
-
-            let mut state_lock = state.lock().unwrap();
-            let parsed = pgn_processor::parse_pgn(&pgn_text);
-
-            let white = parsed.headers.get("White").cloned().unwrap_or_else(|| "WhitePlayer".to_string());
-            let black = parsed.headers.get("Black").cloned().unwrap_or_else(|| "BlackPlayer".to_string());
-            let date = parsed.headers.get("Date").cloned().unwrap_or_else(|| "2026-06-12".to_string());
-            let round = parsed.headers.get("Round").filter(|r| !r.is_empty() && *r != "?" && *r != "-");
-            let game_id = match round {
-                Some(r) => format!("{}_{}_{}_{}", white, black, date, r).replace(" ", "_"),
-                None => format!("{}_{}_{}", white, black, date).replace(" ", "_"),
-            };
-
-            let _ = ingest_pgn_game(&mut state_lock.db, &game_id, "Imported PGN", &pgn_text, Some(date));
-
-            // Trigger background thread to analyze and evaluate this game!
-            let sf_path = state_lock.stockfish_path.clone();
-            let state_thread = state.clone();
-            let refresh_thread = refresh_data_cp.clone();
-            let game_id_thread = game_id.clone();
-
-            thread::spawn(move || {
-                let mut sf = match StockfishEngine::new(&sf_path) {
-                    Ok(engine) => engine,
-                    Err(e) => {
-                        println!("Failed to launch engine: {e}");
-                        return;
-                    }
-                };
-
-                let positions = {
-                    let state = state_thread.lock().unwrap();
-                    state.db.get_positions_for_game(&game_id_thread).unwrap_or_default()
-                };
-
-                let mut losses = Vec::new();
-
-                for pos in &positions {
-                    // Analyze position
-                    let eval_res = sf.analyze_fen(&pos.fen, AnalysisConfig { depth: 8, multipv: 3 });
-                    if let Ok(analysis) = eval_res {
-                        if !analysis.variations.is_empty() {
-                            let best_score = score_to_centipawns(analysis.variations[0].score);
-
-                            // Find played move score
-                            let played_score = if analysis.bestmove == pos.played_move {
-                                best_score
-                            } else if let Some(v) = analysis.variations.iter().find(|var| !var.pv.is_empty() && var.pv[0] == pos.played_move) {
-                                score_to_centipawns(v.score)
-                            } else {
-                                // Evaluate position after played move
-                                let mut played_chess: Chess = pos.fen.parse::<sk_fen::Fen>().map(|f| f.into_position(CastlingMode::Standard).unwrap()).unwrap();
-                                let uci: Uci = pos.played_move.parse().unwrap();
-                                let m = uci.to_move(&played_chess).unwrap();
-                                played_chess.play_unchecked(&m);
-                                let next_fen = shakmaty::fen::Fen::from_position(played_chess, shakmaty::EnPassantMode::Always).to_string();
-
-                                if let Ok(next_analysis) = sf.analyze_fen(&next_fen, AnalysisConfig { depth: 8, multipv: 1 }) {
-                                    if !next_analysis.variations.is_empty() {
-                                        // It's the opponent's turn to move now, so invert evaluation
-                                        -score_to_centipawns(next_analysis.variations[0].score)
-                                    } else {
-                                        best_score
-                                    }
-                                } else {
-                                    best_score
-                                }
-                            };
-
-                            let loss = (best_score - played_score).max(0);
-                            losses.push(loss);
-
-                            let class = Some(format!(
-                                "{:?}",
-                                engine_controller::classify_centipawn_loss(loss)
-                            ));
-
-                            // Write result back
-                            let mut state = state_thread.lock().unwrap();
-                            let mut updated_pos = pos.clone();
-                            updated_pos.centipawn_loss = Some(loss);
-                            updated_pos.mistake_class = class;
-                            let _ = state.db.insert_position(&updated_pos);
-                        } else {
-                            losses.push(0);
-                        }
-                    } else {
-                        losses.push(0);
-                    }
-                }
-
-                // Compute and persist phase-based accuracy
-                let acc_input: Vec<(u32, Option<i32>)> = positions
-                    .iter()
-                    .zip(losses.iter())
-                    .map(|(pos, &loss)| (pos.ply, Some(loss)))
-                    .collect();
-                let acc = accuracy::compute_game_accuracy(&acc_input);
-                {
-                    let mut state = state_thread.lock().unwrap();
-                    let _ = state.db.update_game_accuracy(
-                        &game_id_thread,
-                        acc.overall,
-                        acc.opening,
-                        acc.middlegame,
-                        acc.endgame,
-                    );
-                }
-
-                // Mistake tree: worst USER eval drop -> best move, top-3 replies, follow-ups.
-                let user_side = tree::user_side_for_game(&white, &black);
-                let worst = positions
-                    .iter()
-                    .zip(losses.iter())
-                    .filter(|(pos, _)| match &user_side {
-                        // ply 1,3,5.. = White's moves (odd plies)
-                        Some(s) => (pos.ply % 2 == 1) == (s == "White"),
-                        None => true,
-                    })
-                    .max_by_key(|(_, loss)| **loss);
-                if let Some((pos_record, &loss)) = worst {
-                    if loss >= 60 {
-                        let mover_is_white = pos_record.fen.split_whitespace().nth(1) == Some("w");
-                        let side = if mover_is_white { "White" } else { "Black" }.to_string();
-                        // 1) correction (my move)
-                        if let Ok(root_analysis) =
-                            sf.analyze_fen(&pos_record.fen, AnalysisConfig { depth: 12, multipv: 1 })
-                        {
-                            let best = root_analysis.bestmove.clone();
-                            let mut st = state_thread.lock().unwrap();
-                            match tree::add_move_edge(&mut st.db, &pos_record.fen, &best, &side, "mistake")
-                            {
-                                Ok((_, after_best, _)) => {
-                                    drop(st);
-                                    // 2) top-3 opponent replies
-                                    if let Ok(reply_analysis) =
-                                        sf.analyze_fen(&after_best, AnalysisConfig { depth: 10, multipv: 3 })
-                                    {
-                                        let mut seen = std::collections::HashSet::new();
-                                        for var in reply_analysis.variations.iter().take(3) {
-                                            let Some(reply) = var.pv.first() else { continue };
-                                            if !seen.insert(reply.clone()) { continue; }
-                                            let mut st = state_thread.lock().unwrap();
-                                            let Ok((_, after_reply, _)) = tree::add_move_edge(
-                                                &mut st.db, &after_best, reply, &side, "mistake",
-                                            ) else { continue };
-                                            drop(st);
-                                            // 3) my best follow-up to each reply
-                                            if let Ok(fu) = sf.analyze_fen(
-                                                &after_reply, AnalysisConfig { depth: 10, multipv: 1 },
-                                            ) {
-                                                let mut st = state_thread.lock().unwrap();
-                                                let _ = tree::add_move_edge(
-                                                    &mut st.db, &after_reply, &fu.bestmove, &side, "mistake",
-                                                );
-                                            }
-                                        }
-                                    }
-                                    let mut st = state_thread.lock().unwrap();
-                                    let event = TrainingEventRecord {
-                                        id: format!("evt_{}", uuid_now()),
-                                        user_id: "default_user".to_string(),
-                                        kind: "mistake_tree".to_string(),
-                                        target_id: game_id_thread.clone(),
-                                        outcome: format!("worst drop {loss}cp at ply {}", pos_record.ply),
-                                        score_delta: 0.0,
-                                        created_at: tree::local_now_str(),
-                                    };
-                                    let _ = st.db.insert_training_event(&event);
-                                }
-                                Err(e) => {
-                                    eprintln!("mistake-tree: failed to insert correction edge for game {}: {}", game_id_thread, e);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Trigger UI refresh
-                let _ = slint::invoke_from_event_loop(move || {
-                    refresh_thread();
-                });
-            });
-
-            // Local updates
-            drop(state_lock);
-            refresh_data_cp();
+            import_and_analyze_pgn(&state, &app_weak, &refresh_data_cp, &pgn_text, true);
         });
     }
 
@@ -2635,6 +2451,7 @@ fn main() {
     {
         let state = state.clone();
         let app_weak = app_weak.clone();
+        let refresh_data = refresh_data.clone();
         app.on_play_click_square(move |idx: i32| {
             let mut st = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
@@ -2718,7 +2535,11 @@ fn main() {
 
             use shakmaty::Position;
             if st.play_chess.is_game_over() {
-                finish_play_game(&mut st, &app, "Game over");
+                let pgn = finish_play_game(&mut st, &app, "Game over");
+                drop(st);
+                if let Some(pgn) = pgn {
+                    import_and_analyze_pgn(&state, &app_weak, &refresh_data, &pgn, false);
+                }
                 return;
             }
             let msg = bot_take_turn(&mut st, &app);
@@ -2728,7 +2549,11 @@ fn main() {
             };
             app.set_play_status(slint::SharedString::from(msg));
             if ended {
-                finish_play_game(&mut st, &app, "Game over");
+                let pgn = finish_play_game(&mut st, &app, "Game over");
+                drop(st);
+                if let Some(pgn) = pgn {
+                    import_and_analyze_pgn(&state, &app_weak, &refresh_data, &pgn, false);
+                }
             }
         });
     }
@@ -2737,10 +2562,15 @@ fn main() {
     {
         let state = state.clone();
         let app_weak = app_weak.clone();
+        let refresh_data = refresh_data.clone();
         app.on_play_resign(move || {
             let mut st = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
-            finish_play_game(&mut st, &app, "Resigned");
+            let pgn = finish_play_game(&mut st, &app, "Resigned");
+            drop(st);
+            if let Some(pgn) = pgn {
+                import_and_analyze_pgn(&state, &app_weak, &refresh_data, &pgn, false);
+            }
         });
     }
 
@@ -2848,8 +2678,11 @@ fn bot_take_turn(state: &mut AppState, app: &AppWindow) -> String {
     format!("Bot played {uci_str}. Your move.")
 }
 
-/// End the bot game: build the summary and leave the moves for optional review.
-fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) {
+/// End the bot game: build the summary, determine the outcome, show the Game
+/// Review Brief (Task 5 wires the Slint side of this), and return the PGN to
+/// auto-analyze — the caller must drop its state lock before importing it
+/// (see the call sites below).
+fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) -> Option<String> {
     app.set_play_active(false);
     let total = state.play_moves_uci.len();
     let mut summary = format!(
@@ -2868,6 +2701,326 @@ fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) {
         ));
     }
     app.set_play_summary(slint::SharedString::from(summary));
+
+    let (result_tag, header) =
+        bot_game_outcome(&state.play_chess, &state.play_side, reason == "Resigned");
+    app.set_game_review_result_text(slint::SharedString::from(header));
+    app.set_show_game_review_brief(true);
+    app.set_review_status(slint::SharedString::from("Analyzing with Stockfish..."));
+
+    build_bot_game_pgn(&state.play_moves_uci, &state.play_side, result_tag)
+}
+
+/// Import a finished/pasted PGN, persist it, and spawn Stockfish analysis in
+/// the background. `switch_to_review` controls whether the UI jumps to the
+/// Review screen immediately (manual "Import & Analyze Game" / "Review This
+/// Game" clicks) or stays put (auto-triggered right after a bot game, where
+/// the Game Review Brief overlay is shown instead — see Task 5).
+fn import_and_analyze_pgn(
+    state: &Arc<Mutex<AppState>>,
+    app_weak: &slint::Weak<AppWindow>,
+    refresh_data_cp: &Arc<impl Fn() + Send + Sync + 'static>,
+    pgn_text: &str,
+    switch_to_review: bool,
+) {
+    if pgn_text.trim().is_empty() {
+        return;
+    }
+
+    let mut state_lock = state.lock().unwrap();
+    let parsed = pgn_processor::parse_pgn(pgn_text);
+
+    let white = parsed
+        .headers
+        .get("White")
+        .cloned()
+        .unwrap_or_else(|| "WhitePlayer".to_string());
+    let black = parsed
+        .headers
+        .get("Black")
+        .cloned()
+        .unwrap_or_else(|| "BlackPlayer".to_string());
+    let date = parsed
+        .headers
+        .get("Date")
+        .cloned()
+        .unwrap_or_else(|| "2026-06-12".to_string());
+    let round = parsed
+        .headers
+        .get("Round")
+        .filter(|r| !r.is_empty() && *r != "?" && *r != "-");
+    let game_id = match round {
+        Some(r) => format!("{}_{}_{}_{}", white, black, date, r).replace(" ", "_"),
+        None => format!("{}_{}_{}", white, black, date).replace(" ", "_"),
+    };
+
+    if let Err(e) = ingest_pgn_game(
+        &mut state_lock.db,
+        &game_id,
+        "Imported PGN",
+        pgn_text,
+        Some(date),
+    ) {
+        drop(state_lock);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_review_status(slint::SharedString::from(format!("Import failed: {e}")));
+        }
+        return;
+    }
+
+    // Trigger background thread to analyze and evaluate this game!
+    let sf_path = state_lock.stockfish_path.clone();
+    let state_thread = state.clone();
+    let refresh_thread = refresh_data_cp.clone();
+    let game_id_thread = game_id.clone();
+    let app_weak_thread = app_weak.clone();
+
+    thread::spawn(move || {
+        let mut sf = match StockfishEngine::new(&sf_path) {
+            Ok(engine) => engine,
+            Err(e) => {
+                let app_weak_error = app_weak_thread.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = app_weak_error.upgrade() {
+                        app.set_review_status(slint::SharedString::from(format!(
+                            "Stockfish failed: {e}"
+                        )));
+                    }
+                });
+                return;
+            }
+        };
+
+        let positions = {
+            let state = state_thread.lock().unwrap();
+            state
+                .db
+                .get_positions_for_game(&game_id_thread)
+                .unwrap_or_default()
+        };
+
+        let mut losses = Vec::new();
+
+        for pos in &positions {
+            let is_book = {
+                let state = state_thread.lock().unwrap();
+                is_book_move(&state.db, &pos.fen, &pos.played_move)
+            };
+            // Analyze position
+            let eval_res = sf.analyze_fen(
+                &pos.fen,
+                AnalysisConfig {
+                    depth: 8,
+                    multipv: 3,
+                },
+            );
+            if let Ok(analysis) = eval_res {
+                if !analysis.variations.is_empty() {
+                    let best_score = score_to_centipawns(analysis.variations[0].score);
+
+                    // Find played move score
+                    let played_score = if analysis.bestmove == pos.played_move {
+                        best_score
+                    } else if let Some(v) = analysis
+                        .variations
+                        .iter()
+                        .find(|var| !var.pv.is_empty() && var.pv[0] == pos.played_move)
+                    {
+                        score_to_centipawns(v.score)
+                    } else {
+                        // Evaluate position after played move
+                        let mut played_chess: Chess = pos
+                            .fen
+                            .parse::<sk_fen::Fen>()
+                            .map(|f| f.into_position(CastlingMode::Standard).unwrap())
+                            .unwrap();
+                        let uci: Uci = pos.played_move.parse().unwrap();
+                        let m = uci.to_move(&played_chess).unwrap();
+                        played_chess.play_unchecked(&m);
+                        let next_fen = shakmaty::fen::Fen::from_position(
+                            played_chess,
+                            shakmaty::EnPassantMode::Always,
+                        )
+                        .to_string();
+
+                        if let Ok(next_analysis) = sf.analyze_fen(
+                            &next_fen,
+                            AnalysisConfig {
+                                depth: 8,
+                                multipv: 1,
+                            },
+                        ) {
+                            if !next_analysis.variations.is_empty() {
+                                // It's the opponent's turn to move now, so invert evaluation
+                                -score_to_centipawns(next_analysis.variations[0].score)
+                            } else {
+                                best_score
+                            }
+                        } else {
+                            best_score
+                        }
+                    };
+
+                    let loss = (best_score - played_score).max(0);
+                    losses.push(loss);
+
+                    let class = Some(format!(
+                        "{:?}",
+                        engine_controller::classify_review_move(
+                            loss,
+                            analysis.bestmove == pos.played_move,
+                            best_score,
+                            is_book,
+                        )
+                    ));
+
+                    // Write result back
+                    let mut state = state_thread.lock().unwrap();
+                    let mut updated_pos = pos.clone();
+                    updated_pos.centipawn_loss = Some(loss);
+                    updated_pos.mistake_class = class;
+                    let _ = state.db.insert_position(&updated_pos);
+                }
+            } else {
+                losses.push(0);
+            }
+        }
+
+        // Compute and persist phase-based accuracy
+        let acc_input: Vec<(u32, Option<i32>)> = positions
+            .iter()
+            .zip(losses.iter())
+            .map(|(pos, &loss)| (pos.ply, Some(loss)))
+            .collect();
+        let acc = accuracy::compute_game_accuracy(&acc_input);
+        {
+            let mut state = state_thread.lock().unwrap();
+            let _ = state.db.update_game_accuracy(
+                &game_id_thread,
+                acc.overall,
+                acc.opening,
+                acc.middlegame,
+                acc.endgame,
+            );
+        }
+
+        // Mistake tree: worst USER eval drop -> best move, top-3 replies, follow-ups.
+        let user_side = tree::user_side_for_game(&white, &black);
+        let worst = positions
+            .iter()
+            .zip(losses.iter())
+            .filter(|(pos, _)| match &user_side {
+                // ply 1,3,5.. = White's moves (odd plies)
+                Some(s) => (pos.ply % 2 == 1) == (s == "White"),
+                None => true,
+            })
+            .max_by_key(|(_, loss)| **loss);
+        if let Some((pos_record, &loss)) = worst {
+            if loss >= 60 {
+                let mover_is_white = pos_record.fen.split_whitespace().nth(1) == Some("w");
+                let side = if mover_is_white { "White" } else { "Black" }.to_string();
+                // 1) correction (my move)
+                if let Ok(root_analysis) = sf.analyze_fen(
+                    &pos_record.fen,
+                    AnalysisConfig {
+                        depth: 12,
+                        multipv: 1,
+                    },
+                ) {
+                    let best = root_analysis.bestmove.clone();
+                    let mut st = state_thread.lock().unwrap();
+                    match tree::add_move_edge(&mut st.db, &pos_record.fen, &best, &side, "mistake")
+                    {
+                        Ok((_, after_best, _)) => {
+                            drop(st);
+                            // 2) top-3 opponent replies
+                            if let Ok(reply_analysis) = sf.analyze_fen(
+                                &after_best,
+                                AnalysisConfig {
+                                    depth: 10,
+                                    multipv: 3,
+                                },
+                            ) {
+                                let mut seen = std::collections::HashSet::new();
+                                for var in reply_analysis.variations.iter().take(3) {
+                                    let Some(reply) = var.pv.first() else {
+                                        continue;
+                                    };
+                                    if !seen.insert(reply.clone()) {
+                                        continue;
+                                    }
+                                    let mut st = state_thread.lock().unwrap();
+                                    let Ok((_, after_reply, _)) = tree::add_move_edge(
+                                        &mut st.db,
+                                        &after_best,
+                                        reply,
+                                        &side,
+                                        "mistake",
+                                    ) else {
+                                        continue;
+                                    };
+                                    drop(st);
+                                    // 3) my best follow-up to each reply
+                                    if let Ok(fu) = sf.analyze_fen(
+                                        &after_reply,
+                                        AnalysisConfig {
+                                            depth: 10,
+                                            multipv: 1,
+                                        },
+                                    ) {
+                                        let mut st = state_thread.lock().unwrap();
+                                        let _ = tree::add_move_edge(
+                                            &mut st.db,
+                                            &after_reply,
+                                            &fu.bestmove,
+                                            &side,
+                                            "mistake",
+                                        );
+                                    }
+                                }
+                            }
+                            let mut st = state_thread.lock().unwrap();
+                            let event = TrainingEventRecord {
+                                id: format!("evt_{}", uuid_now()),
+                                user_id: "default_user".to_string(),
+                                kind: "mistake_tree".to_string(),
+                                target_id: game_id_thread.clone(),
+                                outcome: format!("worst drop {loss}cp at ply {}", pos_record.ply),
+                                score_delta: 0.0,
+                                created_at: tree::local_now_str(),
+                            };
+                            let _ = st.db.insert_training_event(&event);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "mistake-tree: failed to insert correction edge for game {}: {}",
+                                game_id_thread, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Trigger UI refresh
+        let _ = slint::invoke_from_event_loop(move || {
+            refresh_thread();
+            if let Some(app) = app_weak_thread.upgrade() {
+                app.invoke_select_game(slint::SharedString::from(game_id_thread));
+            }
+        });
+    });
+
+    // Local updates
+    drop(state_lock);
+    refresh_data_cp();
+    if let Some(app) = app_weak.upgrade() {
+        if switch_to_review {
+            app.set_active_screen(slint::SharedString::from("review"));
+        }
+        app.set_review_status(slint::SharedString::from("Analyzing with Stockfish..."));
+        app.invoke_select_game(slint::SharedString::from(game_id));
+    }
 }
 
 /// Advance the drill: auto-play opponent edges, load expected my-moves, detect session end.
