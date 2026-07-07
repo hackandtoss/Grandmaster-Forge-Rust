@@ -297,6 +297,7 @@ slint::slint! {
         in-out property <[ReviewStatEntry]> game-review-stats: [];
         callback game-review-open();
         callback game-review-close();
+        callback show-game-review-brief-for(string);
 
         // Interactive board pieces (64 strings)
         in-out property <[string]> board-pieces: [
@@ -816,6 +817,27 @@ slint::slint! {
                                                 alignment: space-between;
                                                 Text { text: game.date; color: #a1a1aa; font-size: 11px; }
                                                 Text { text: game.result; color: #fbbf24; font-size: 11px; font-weight: 700; }
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            x: parent.width - self.width - 8px;
+                                            y: 8px;
+                                            width: 56px;
+                                            height: 22px;
+                                            background: #3f3f46;
+                                            border-radius: 4px;
+                                            Text {
+                                                text: "Review";
+                                                color: #e4e4e7;
+                                                font-size: 10px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            TouchArea {
+                                                clicked => {
+                                                    root.show-game-review-brief-for(game.id);
+                                                }
                                             }
                                         }
                                     }
@@ -1681,6 +1703,92 @@ fn main() {
             app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
                 fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"),
             ))));
+        });
+    }
+
+    // Wiring on-demand Game Review Brief from the Reviewed Games list
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_show_game_review_brief_for(move |game_id: slint::SharedString| {
+            let state = state.lock().unwrap();
+            let Some(app) = app_weak.upgrade() else {
+                return;
+            };
+
+            let positions = state
+                .db
+                .get_positions_for_game(&game_id)
+                .unwrap_or_default();
+            let class_names: Vec<&str> = positions
+                .iter()
+                .filter_map(|pos| pos.mistake_class.as_deref())
+                .collect();
+            let accuracy = state
+                .db
+                .conn
+                .query_row(
+                    "SELECT accuracy_overall FROM games WHERE id = ?1",
+                    [game_id.as_str()],
+                    |row| row.get::<_, Option<f64>>(0),
+                )
+                .ok()
+                .flatten()
+                .map(|value| value as f32);
+            let games = state.db.get_games().unwrap_or_default();
+            drop(state);
+
+            let Some(game) = games.into_iter().find(|g| g.id == game_id.as_str()) else {
+                return;
+            };
+            let is_bot_game = game.white == "You" && game.black == "Forge Bot"
+                || game.white == "Forge Bot" && game.black == "You";
+            // Bot games always store the literal placeholder names "You"/"Forge
+            // Bot" rather than a configured Lichess/Chess.com username, so
+            // `tree::user_side_for_game` (which matches against those env-var
+            // usernames) can never resolve a side for them — it would leave
+            // `won` permanently false and make "You beat Forge Bot!" dead code.
+            // Resolve the bot-game side directly from the same literal check
+            // used for `is_bot_game`; fall back to the username-based lookup
+            // for real imported games.
+            let user_side = if is_bot_game {
+                if game.white == "You" {
+                    Some("White".to_string())
+                } else {
+                    Some("Black".to_string())
+                }
+            } else {
+                tree::user_side_for_game(&game.white, &game.black)
+            };
+            let won = match (&user_side, game.result.as_deref()) {
+                (Some(side), Some("1-0")) => side == "White",
+                (Some(side), Some("0-1")) => side == "Black",
+                _ => false,
+            };
+            let drawn = matches!(game.result.as_deref(), Some("1/2-1/2"));
+            let header = if drawn {
+                "Draw".to_string()
+            } else if is_bot_game {
+                if won {
+                    "You beat Forge Bot!".to_string()
+                } else {
+                    "Forge Bot won".to_string()
+                }
+            } else if won {
+                "You won".to_string()
+            } else {
+                "You lost".to_string()
+            };
+
+            app.set_game_review_game_id(game_id.clone());
+            app.set_game_review_result_text(slint::SharedString::from(header));
+            app.set_game_review_stats(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                review_stat_entries(&class_names),
+            ))));
+            app.set_game_review_accuracy_text(slint::SharedString::from(accuracy_summary_text(
+                accuracy,
+            )));
+            app.set_show_game_review_brief(true);
         });
     }
 
