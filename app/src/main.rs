@@ -6,9 +6,12 @@ mod weakness;
 
 use db_manager::{GameRecord, PositionRecord, SqliteStore, TrainingEventRecord, TrainingStore};
 use engine_controller::{AnalysisConfig, StockfishEngine};
+use shakmaty::san::San;
 use shakmaty::uci::Uci;
 use shakmaty::{CastlingMode, Chess, Position};
 use slint::Model;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -40,6 +43,11 @@ slint::slint! {
         date: string,
     }
 
+    struct ReviewStatEntry {
+        label: string,
+        count: int,
+    }
+
     component SidebarButton inherits Rectangle {
         in property <string> text;
         in property <bool> active;
@@ -62,11 +70,21 @@ slint::slint! {
         }
     }
 
-    export component AppWindow inherits Window {
-        title: "Grandmaster Forge";
-        min-width: 1000px;
-        min-height: 700px;
-        background: #121214;
+    component ChessBoard inherits Rectangle {
+        in property <[string]> pieces: [
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+        ];
+        in property <int> selected-square: -1;
+        in property <color> highlight-color: #fcd34d;
+        in property <bool> interactive: true;
+        callback square-clicked(int);
 
         pure function piece-symbol(piece: string) -> string {
             return piece == "P" || piece == "p" ? "♟"
@@ -85,6 +103,164 @@ slint::slint! {
                     ? #00000000
                     : #111827;
         }
+
+        // Stay square: shrink to the smaller of whatever space the layout
+        // gives us, floored at today's fixed size, capped so it doesn't
+        // dwarf the surrounding panel on an ultrawide window.
+        property <length> board-size: max(360px, min(560px, min(root.width, root.height)));
+        property <length> cell-size: root.board-size / 8;
+
+        // max-width/max-height mirror the 560px soft cap in board-size above.
+        // Without these, this root Rectangle (not just the inner checkerboard)
+        // has no upper bound, so a call site that places ChessBoard directly in
+        // a HorizontalLayout with a non-stretchy sibling (e.g. Play vs Bot) would
+        // let this panel claim all surplus width on an ultrawide window, growing
+        // into a mostly-empty box far past the visible 560px grid.
+        min-width: 360px;
+        min-height: 360px;
+        max-width: 560px;
+        max-height: 560px;
+        horizontal-stretch: 1;
+        vertical-stretch: 1;
+        background: #1a1a1e;
+        border-radius: 8px;
+        border-color: #3f3f46;
+        border-width: 2px;
+
+        Rectangle {
+            x: (parent.width - root.board-size) / 2;
+            y: (parent.height - root.board-size) / 2;
+            width: root.board-size;
+            height: root.board-size;
+
+            for index in 64: Rectangle {
+                x: mod(index, 8) * root.cell-size;
+                y: floor(index / 8) * root.cell-size;
+                width: root.cell-size;
+                height: root.cell-size;
+                background: (root.selected-square == index)
+                    ? root.highlight-color
+                    : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
+
+                Text {
+                    text: root.piece-symbol(root.pieces[index]);
+                    font-size: root.cell-size * 0.62;
+                    font-family: "Segoe UI Symbol";
+                    color: root.piece-color(root.pieces[index]);
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                if root.interactive : TouchArea {
+                    clicked => { root.square-clicked(index); }
+                }
+            }
+        }
+    }
+
+    component GameReviewBrief inherits Rectangle {
+        in property <string> result-text;
+        in property <bool> ready;
+        in property <string> status-text;
+        in property <string> accuracy-text;
+        in property <[ReviewStatEntry]> stats;
+        callback review-clicked();
+        callback close-clicked();
+
+        background: #000000aa;
+
+        Rectangle {
+            width: 380px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #1a1a1e;
+            border-radius: 12px;
+            border-color: #3f3f46;
+            border-width: 1px;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    alignment: end;
+                    Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        Text {
+                            text: "✕";
+                            color: #a1a1aa;
+                            font-size: 16px;
+                        }
+                        TouchArea {
+                            clicked => { root.close-clicked(); }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.result-text;
+                    color: #ffffff;
+                    font-size: 20px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                }
+
+                if !root.ready : Text {
+                    text: root.status-text;
+                    color: #a78bfa;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+
+                if root.ready : Text {
+                    text: root.accuracy-text;
+                    color: #e4e4e7;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
+
+                if root.ready : HorizontalLayout {
+                    spacing: 8px;
+                    alignment: center;
+                    for stat in root.stats: Rectangle {
+                        background: #27272a;
+                        border-radius: 6px;
+                        width: 72px;
+                        height: 56px;
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: stat.count;
+                                color: #ffffff;
+                                font-size: 18px;
+                                font-weight: 800;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: stat.label;
+                                color: #a1a1aa;
+                                font-size: 10px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                if root.ready : Button {
+                    text: "Game Review";
+                    clicked => { root.review-clicked(); }
+                }
+            }
+        }
+    }
+
+    export component AppWindow inherits Window {
+        title: "Grandmaster Forge";
+        min-width: 1000px;
+        min-height: 700px;
+        background: #121214;
 
         // Properties for dashboard
         in-out property <string> rec-mode: "ReviewRecentGame";
@@ -112,6 +288,16 @@ slint::slint! {
         in-out property <int> selected-move-index: -1;
         in-out property <string> selected-move-eval: "";
         in-out property <string> selected-move-best: "";
+        in-out property <string> selected-game-summary: "Import or select a game to review.";
+        in-out property <string> review-status: "";
+        in-out property <bool> show-game-review-brief: false;
+        in-out property <string> game-review-game-id: "";
+        in-out property <string> game-review-result-text: "";
+        in-out property <string> game-review-accuracy-text: "";
+        in-out property <[ReviewStatEntry]> game-review-stats: [];
+        callback game-review-open();
+        callback game-review-close();
+        callback show-game-review-brief-for(string);
 
         // Interactive board pieces (64 strings)
         in-out property <[string]> board-pieces: [
@@ -511,41 +697,13 @@ slint::slint! {
                     // Interactive Chess Board and Drill View (Right Column)
                     VerticalLayout {
                         spacing: 16px;
-                        alignment: center;
+                        horizontal-stretch: 1;
 
                         // Chess board container
-                        Rectangle {
-                            width: 360px;
-                            height: 360px;
-                            background: #1a1a1e;
-                            border-radius: 8px;
-                            border-color: #3f3f46;
-                            border-width: 2px;
-
-                            for index in 64: Rectangle {
-                                x: mod(index, 8) * 45px;
-                                y: floor(index / 8) * 45px;
-                                width: 45px;
-                                height: 45px;
-                                background: (root.board-selected-square == index)
-                                    ? #fcd34d
-                                    : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
-
-                                Text {
-                                    text: root.piece-symbol(root.board-pieces[index]);
-                                    font-size: 28px;
-                                    font-family: "Segoe UI Symbol";
-                                    color: root.piece-color(root.board-pieces[index]);
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-
-                                TouchArea {
-                                    clicked => {
-                                        root.click-board-square(index);
-                                    }
-                                }
-                            }
+                        ChessBoard {
+                            pieces: root.board-pieces;
+                            selected-square: root.board-selected-square;
+                            square-clicked(index) => { root.click-board-square(index); }
                         }
 
                         // Drill Controls
@@ -553,7 +711,12 @@ slint::slint! {
                             background: #1a1a1e;
                             border-radius: 8px;
                             padding: 16px;
-                            width: 360px;
+                            // Bounded to match ChessBoard's own soft cap so this
+                            // column can't claim unbounded width on an ultrawide
+                            // window (and, in turn, so the outer HorizontalLayout
+                            // can't starve its sibling column of surplus space).
+                            min-width: 360px;
+                            max-width: 560px;
 
                             VerticalLayout {
                                 spacing: 12px;
@@ -656,6 +819,27 @@ slint::slint! {
                                                 Text { text: game.result; color: #fbbf24; font-size: 11px; font-weight: 700; }
                                             }
                                         }
+
+                                        Rectangle {
+                                            x: parent.width - self.width - 8px;
+                                            y: 8px;
+                                            width: 56px;
+                                            height: 22px;
+                                            background: #3f3f46;
+                                            border-radius: 4px;
+                                            Text {
+                                                text: "Review";
+                                                color: #e4e4e7;
+                                                font-size: 10px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            TouchArea {
+                                                clicked => {
+                                                    root.show-game-review-brief-for(game.id);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -669,32 +853,11 @@ slint::slint! {
                         // Board View
                         VerticalLayout {
                             spacing: 12px;
-                            alignment: center;
+                            horizontal-stretch: 1;
 
-                            Rectangle {
-                                width: 360px;
-                                height: 360px;
-                                background: #1a1a1e;
-                                border-radius: 8px;
-                                border-color: #3f3f46;
-                                border-width: 2px;
-
-                                for index in 64: Rectangle {
-                                    x: mod(index, 8) * 45px;
-                                    y: floor(index / 8) * 45px;
-                                    width: 45px;
-                                    height: 45px;
-                                    background: (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
-
-                                    Text {
-                                        text: root.piece-symbol(root.board-pieces[index]);
-                                        font-size: 28px;
-                                        font-family: "Segoe UI Symbol";
-                                        color: root.piece-color(root.board-pieces[index]);
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
+                            ChessBoard {
+                                pieces: root.board-pieces;
+                                interactive: false;
                             }
 
                             // Engine Eval Block
@@ -702,7 +865,12 @@ slint::slint! {
                                 background: #1a1a1e;
                                 border-radius: 8px;
                                 padding: 12px;
-                                width: 360px;
+                                // Bounded to match ChessBoard's own soft cap so this
+                                // column can't claim unbounded width on an ultrawide
+                                // window (and, in turn, so the outer HorizontalLayout
+                                // can't starve its sibling column of surplus space).
+                                min-width: 360px;
+                                max-width: 560px;
 
                                 VerticalLayout {
                                     spacing: 4px;
@@ -823,34 +991,11 @@ slint::slint! {
                         }
 
                         // 8×8 board
-                        Rectangle {
-                            width: 360px;
-                            height: 360px;
-                            background: #1a1a1e;
-                            border-radius: 8px;
-                            border-color: #3f3f46;
-                            border-width: 2px;
-
-                            for index in 64: Rectangle {
-                                x: mod(index, 8) * 45px;
-                                y: floor(index / 8) * 45px;
-                                width: 45px;
-                                height: 45px;
-                                background: (root.builder-selected-square == index)
-                                    ? #7c3aed
-                                    : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
-                                Text {
-                                    text: root.piece-symbol(root.builder-board-pieces[index]);
-                                    font-size: 28px;
-                                    font-family: "Segoe UI Symbol";
-                                    color: root.piece-color(root.builder-board-pieces[index]);
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                                TouchArea {
-                                    clicked => { root.builder-click-square(index); }
-                                }
-                            }
+                        ChessBoard {
+                            pieces: root.builder-board-pieces;
+                            selected-square: root.builder-selected-square;
+                            highlight-color: #7c3aed;
+                            square-clicked(index) => { root.builder-click-square(index); }
                         }
 
                         // Undo / Reset buttons
@@ -987,26 +1132,10 @@ slint::slint! {
                 if (root.active-screen == "play") : HorizontalLayout {
                     spacing: 24px;
                     // Board
-                    Rectangle {
-                        width: 360px; height: 360px;
-                        background: #1a1a1e; border-radius: 8px;
-                        border-color: #3f3f46; border-width: 2px;
-                        for index in 64: Rectangle {
-                            x: mod(index, 8) * 45px;
-                            y: floor(index / 8) * 45px;
-                            width: 45px; height: 45px;
-                            background: (root.play-selected-square == index)
-                                ? #fcd34d
-                                : (mod(floor(index / 8) + mod(index, 8), 2) == 0 ? #f0d9b5 : #b58863);
-                            Text {
-                                text: root.piece-symbol(root.play-board-pieces[index]);
-                                font-size: 28px;
-                                font-family: "Segoe UI Symbol";
-                                color: root.piece-color(root.play-board-pieces[index]);
-                                horizontal-alignment: center; vertical-alignment: center;
-                            }
-                            TouchArea { clicked => { root.play-click-square(index); } }
-                        }
+                    ChessBoard {
+                        pieces: root.play-board-pieces;
+                        selected-square: root.play-selected-square;
+                        square-clicked(index) => { root.play-click-square(index); }
                     }
                     // Controls
                     VerticalLayout {
@@ -1050,6 +1179,18 @@ slint::slint! {
                             clicked => { root.play-review-game(); }
                         }
                     }
+                }
+
+                if root.show-game-review-brief : GameReviewBrief {
+                    width: 100%;
+                    height: 100%;
+                    result-text: root.game-review-result-text;
+                    ready: root.game-review-stats.length > 0 || root.game-review-accuracy-text != "";
+                    status-text: root.review-status;
+                    accuracy-text: root.game-review-accuracy-text;
+                    stats: root.game-review-stats;
+                    review-clicked => { root.game-review-open(); }
+                    close-clicked => { root.game-review-close(); }
                 }
             }
         }
@@ -1099,6 +1240,145 @@ fn score_to_centipawns(score: engine_controller::Score) -> i32 {
             }
         }
     }
+}
+
+fn estimated_elo(accuracy: f32) -> i32 {
+    (((800.0 + accuracy * 17.2) / 50.0).round() * 50.0) as i32
+}
+
+fn accuracy_summary_text(accuracy: Option<f32>) -> String {
+    match accuracy {
+        Some(value) => format!("Accuracy {:.0}% | Est. Elo {}", value, estimated_elo(value)),
+        None => "Accuracy pending | Est. Elo pending".to_string(),
+    }
+}
+
+fn game_review_summary(accuracy: Option<f32>, classes: &[&str]) -> String {
+    let count = |label: &str| classes.iter().filter(|&&class| class == label).count();
+    format!(
+        "{} | Book {} | Blunder {} | Mistake {} | Miss {} | Good {} | Excellent {} | Best {} | Great {} | Brilliant {}",
+        accuracy_summary_text(accuracy),
+        count("Book"),
+        count("Blunder"),
+        count("Mistake"),
+        count("Miss"),
+        count("Good"),
+        count("Excellent"),
+        count("Best"),
+        count("Great"),
+        count("Brilliant"),
+    )
+}
+
+/// Non-zero move-classification counts, in a fixed display order, for the
+/// Game Review Brief's stat grid. Mirrors the 9 engine_controller::MoveClass
+/// variants exactly (there is no "Perfect" class).
+fn review_stat_entries(classes: &[&str]) -> Vec<ReviewStatEntry> {
+    const ORDER: [&str; 9] = [
+        "Best",
+        "Book",
+        "Blunder",
+        "Brilliant",
+        "Excellent",
+        "Good",
+        "Great",
+        "Miss",
+        "Mistake",
+    ];
+    ORDER
+        .iter()
+        .filter_map(|&label| {
+            let count = classes.iter().filter(|&&class| class == label).count();
+            if count == 0 {
+                None
+            } else {
+                Some(ReviewStatEntry {
+                    label: slint::SharedString::from(label),
+                    count: count as i32,
+                })
+            }
+        })
+        .collect()
+}
+
+/// Determine a finished bot game's PGN result tag and a user-facing header,
+/// from the user's perspective (`side` is `state.play_side`).
+fn bot_game_outcome(chess: &Chess, side: &str, resigned: bool) -> (&'static str, &'static str) {
+    if resigned {
+        let tag = if side == "White" { "0-1" } else { "1-0" };
+        return (tag, "Forge Bot won");
+    }
+    match chess.outcome() {
+        Some(shakmaty::Outcome::Decisive { winner }) => {
+            let tag = if winner == shakmaty::Color::White {
+                "1-0"
+            } else {
+                "0-1"
+            };
+            let user_won = (winner == shakmaty::Color::White) == (side == "White");
+            let header = if user_won {
+                "You beat Forge Bot!"
+            } else {
+                "Forge Bot won"
+            };
+            (tag, header)
+        }
+        Some(shakmaty::Outcome::Draw) => ("1/2-1/2", "Draw"),
+        None => ("*", "Game over"),
+    }
+}
+
+/// Rebuild a bot game's PGN (SAN movetext) from its recorded UCI moves.
+fn build_bot_game_pgn(moves: &[String], side: &str, result_tag: &str) -> Option<String> {
+    if moves.is_empty() {
+        return None;
+    }
+    let mut pos = Chess::default();
+    let mut san_moves: Vec<String> = Vec::new();
+    for uci_str in moves {
+        let Ok(uci) = uci_str.parse::<Uci>() else {
+            break;
+        };
+        let Ok(m) = uci.to_move(&pos) else { break };
+        san_moves.push(San::from_move(&pos, &m).to_string());
+        pos.play_unchecked(&m);
+    }
+    let mut movetext = String::new();
+    for (i, san) in san_moves.iter().enumerate() {
+        if i % 2 == 0 {
+            movetext.push_str(&format!("{}. ", i / 2 + 1));
+        }
+        movetext.push_str(san);
+        movetext.push(' ');
+    }
+    let user_name = std::env::var("LICHESS_USERNAME")
+        .or_else(|_| std::env::var("CHESSCOM_USERNAME"))
+        .unwrap_or_else(|_| "You".to_string());
+    let (w, b) = if side == "White" {
+        (user_name.as_str(), "Forge Bot")
+    } else {
+        ("Forge Bot", user_name.as_str())
+    };
+    Some(format!(
+        "[Event \"Bot Game\"]\n[White \"{w}\"]\n[Black \"{b}\"]\n[Date \"{}\"]\n[Round \"{}\"]\n\n{movetext}{result_tag}",
+        tree::local_now_str().replace('-', "."),
+        uuid_now()
+    ))
+}
+
+fn side_to_move_label(fen: &str) -> &'static str {
+    if fen.split_whitespace().nth(1) == Some("b") {
+        "Black"
+    } else {
+        "White"
+    }
+}
+
+fn is_book_move(db: &SqliteStore, fen: &str, played_move: &str) -> bool {
+    db.get_repertoire_moves_from(fen, side_to_move_label(fen))
+        .unwrap_or_default()
+        .iter()
+        .any(|edge| edge.uci == played_move)
 }
 
 fn find_stockfish_path() -> String {
@@ -1444,6 +1724,92 @@ fn main() {
         });
     }
 
+    // Wiring on-demand Game Review Brief from the Reviewed Games list
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_show_game_review_brief_for(move |game_id: slint::SharedString| {
+            let state = state.lock().unwrap();
+            let Some(app) = app_weak.upgrade() else {
+                return;
+            };
+
+            let positions = state
+                .db
+                .get_positions_for_game(&game_id)
+                .unwrap_or_default();
+            let class_names: Vec<&str> = positions
+                .iter()
+                .filter_map(|pos| pos.mistake_class.as_deref())
+                .collect();
+            let accuracy = state
+                .db
+                .conn
+                .query_row(
+                    "SELECT accuracy_overall FROM games WHERE id = ?1",
+                    [game_id.as_str()],
+                    |row| row.get::<_, Option<f64>>(0),
+                )
+                .ok()
+                .flatten()
+                .map(|value| value as f32);
+            let games = state.db.get_games().unwrap_or_default();
+            drop(state);
+
+            let Some(game) = games.into_iter().find(|g| g.id == game_id.as_str()) else {
+                return;
+            };
+            let is_bot_game = game.white == "You" && game.black == "Forge Bot"
+                || game.white == "Forge Bot" && game.black == "You";
+            // Bot games always store the literal placeholder names "You"/"Forge
+            // Bot" rather than a configured Lichess/Chess.com username, so
+            // `tree::user_side_for_game` (which matches against those env-var
+            // usernames) can never resolve a side for them — it would leave
+            // `won` permanently false and make "You beat Forge Bot!" dead code.
+            // Resolve the bot-game side directly from the same literal check
+            // used for `is_bot_game`; fall back to the username-based lookup
+            // for real imported games.
+            let user_side = if is_bot_game {
+                if game.white == "You" {
+                    Some("White".to_string())
+                } else {
+                    Some("Black".to_string())
+                }
+            } else {
+                tree::user_side_for_game(&game.white, &game.black)
+            };
+            let won = match (&user_side, game.result.as_deref()) {
+                (Some(side), Some("1-0")) => side == "White",
+                (Some(side), Some("0-1")) => side == "Black",
+                _ => false,
+            };
+            let drawn = matches!(game.result.as_deref(), Some("1/2-1/2"));
+            let header = if drawn {
+                "Draw".to_string()
+            } else if is_bot_game {
+                if won {
+                    "You beat Forge Bot!".to_string()
+                } else {
+                    "Forge Bot won".to_string()
+                }
+            } else if won {
+                "You won".to_string()
+            } else {
+                "You lost".to_string()
+            };
+
+            app.set_game_review_game_id(game_id.clone());
+            app.set_game_review_result_text(slint::SharedString::from(header));
+            app.set_game_review_stats(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                review_stat_entries(&class_names),
+            ))));
+            app.set_game_review_accuracy_text(slint::SharedString::from(accuracy_summary_text(
+                accuracy,
+            )));
+            app.set_show_game_review_brief(true);
+        });
+    }
+
     // Wiring move selection inside a game timeline
     {
         let app_weak = app_weak.clone();
@@ -1631,195 +1997,10 @@ fn main() {
     // Wiring PGN Ingestion & Background analysis
     {
         let state = state.clone();
+        let app_weak = app_weak.clone();
         let refresh_data_cp = refresh_data.clone();
         app.on_import_pgn(move |pgn_text: slint::SharedString| {
-            if pgn_text.trim().is_empty() {
-                return;
-            }
-
-            let mut state_lock = state.lock().unwrap();
-            let parsed = pgn_processor::parse_pgn(&pgn_text);
-
-            let white = parsed.headers.get("White").cloned().unwrap_or_else(|| "WhitePlayer".to_string());
-            let black = parsed.headers.get("Black").cloned().unwrap_or_else(|| "BlackPlayer".to_string());
-            let date = parsed.headers.get("Date").cloned().unwrap_or_else(|| "2026-06-12".to_string());
-            let round = parsed.headers.get("Round").filter(|r| !r.is_empty() && *r != "?" && *r != "-");
-            let game_id = match round {
-                Some(r) => format!("{}_{}_{}_{}", white, black, date, r).replace(" ", "_"),
-                None => format!("{}_{}_{}", white, black, date).replace(" ", "_"),
-            };
-
-            let _ = ingest_pgn_game(&mut state_lock.db, &game_id, "Imported PGN", &pgn_text, Some(date));
-
-            // Trigger background thread to analyze and evaluate this game!
-            let sf_path = state_lock.stockfish_path.clone();
-            let state_thread = state.clone();
-            let refresh_thread = refresh_data_cp.clone();
-            let game_id_thread = game_id.clone();
-
-            thread::spawn(move || {
-                let mut sf = match StockfishEngine::new(&sf_path) {
-                    Ok(engine) => engine,
-                    Err(e) => {
-                        println!("Failed to launch engine: {e}");
-                        return;
-                    }
-                };
-
-                let positions = {
-                    let state = state_thread.lock().unwrap();
-                    state.db.get_positions_for_game(&game_id_thread).unwrap_or_default()
-                };
-
-                let mut losses = Vec::new();
-
-                for pos in &positions {
-                    // Analyze position
-                    let eval_res = sf.analyze_fen(&pos.fen, AnalysisConfig { depth: 8, multipv: 3 });
-                    if let Ok(analysis) = eval_res {
-                        if !analysis.variations.is_empty() {
-                            let best_score = score_to_centipawns(analysis.variations[0].score);
-
-                            // Find played move score
-                            let played_score = if analysis.bestmove == pos.played_move {
-                                best_score
-                            } else if let Some(v) = analysis.variations.iter().find(|var| !var.pv.is_empty() && var.pv[0] == pos.played_move) {
-                                score_to_centipawns(v.score)
-                            } else {
-                                // Evaluate position after played move
-                                let mut played_chess: Chess = pos.fen.parse::<sk_fen::Fen>().map(|f| f.into_position(CastlingMode::Standard).unwrap()).unwrap();
-                                let uci: Uci = pos.played_move.parse().unwrap();
-                                let m = uci.to_move(&played_chess).unwrap();
-                                played_chess.play_unchecked(&m);
-                                let next_fen = shakmaty::fen::Fen::from_position(played_chess, shakmaty::EnPassantMode::Always).to_string();
-
-                                if let Ok(next_analysis) = sf.analyze_fen(&next_fen, AnalysisConfig { depth: 8, multipv: 1 }) {
-                                    if !next_analysis.variations.is_empty() {
-                                        // It's the opponent's turn to move now, so invert evaluation
-                                        -score_to_centipawns(next_analysis.variations[0].score)
-                                    } else {
-                                        best_score
-                                    }
-                                } else {
-                                    best_score
-                                }
-                            };
-
-                            let loss = (best_score - played_score).max(0);
-                            losses.push(loss);
-
-                            let class = engine_controller::classify_centipawn_loss(loss).map(|c| format!("{:?}", c));
-
-                            // Write result back
-                            let mut state = state_thread.lock().unwrap();
-                            let mut updated_pos = pos.clone();
-                            updated_pos.centipawn_loss = Some(loss);
-                            updated_pos.mistake_class = class;
-                            let _ = state.db.insert_position(&updated_pos);
-                        } else {
-                            losses.push(0);
-                        }
-                    } else {
-                        losses.push(0);
-                    }
-                }
-
-                // Compute and persist phase-based accuracy
-                let acc_input: Vec<(u32, Option<i32>)> = positions
-                    .iter()
-                    .zip(losses.iter())
-                    .map(|(pos, &loss)| (pos.ply, Some(loss)))
-                    .collect();
-                let acc = accuracy::compute_game_accuracy(&acc_input);
-                {
-                    let mut state = state_thread.lock().unwrap();
-                    let _ = state.db.update_game_accuracy(
-                        &game_id_thread,
-                        acc.overall,
-                        acc.opening,
-                        acc.middlegame,
-                        acc.endgame,
-                    );
-                }
-
-                // Mistake tree: worst USER eval drop -> best move, top-3 replies, follow-ups.
-                let user_side = tree::user_side_for_game(&white, &black);
-                let worst = positions
-                    .iter()
-                    .zip(losses.iter())
-                    .filter(|(pos, _)| match &user_side {
-                        // ply 1,3,5.. = White's moves (odd plies)
-                        Some(s) => (pos.ply % 2 == 1) == (s == "White"),
-                        None => true,
-                    })
-                    .max_by_key(|(_, loss)| **loss);
-                if let Some((pos_record, &loss)) = worst {
-                    if loss >= 60 {
-                        let mover_is_white = pos_record.fen.split_whitespace().nth(1) == Some("w");
-                        let side = if mover_is_white { "White" } else { "Black" }.to_string();
-                        // 1) correction (my move)
-                        if let Ok(root_analysis) =
-                            sf.analyze_fen(&pos_record.fen, AnalysisConfig { depth: 12, multipv: 1 })
-                        {
-                            let best = root_analysis.bestmove.clone();
-                            let mut st = state_thread.lock().unwrap();
-                            match tree::add_move_edge(&mut st.db, &pos_record.fen, &best, &side, "mistake")
-                            {
-                                Ok((_, after_best, _)) => {
-                                    drop(st);
-                                    // 2) top-3 opponent replies
-                                    if let Ok(reply_analysis) =
-                                        sf.analyze_fen(&after_best, AnalysisConfig { depth: 10, multipv: 3 })
-                                    {
-                                        let mut seen = std::collections::HashSet::new();
-                                        for var in reply_analysis.variations.iter().take(3) {
-                                            let Some(reply) = var.pv.first() else { continue };
-                                            if !seen.insert(reply.clone()) { continue; }
-                                            let mut st = state_thread.lock().unwrap();
-                                            let Ok((_, after_reply, _)) = tree::add_move_edge(
-                                                &mut st.db, &after_best, reply, &side, "mistake",
-                                            ) else { continue };
-                                            drop(st);
-                                            // 3) my best follow-up to each reply
-                                            if let Ok(fu) = sf.analyze_fen(
-                                                &after_reply, AnalysisConfig { depth: 10, multipv: 1 },
-                                            ) {
-                                                let mut st = state_thread.lock().unwrap();
-                                                let _ = tree::add_move_edge(
-                                                    &mut st.db, &after_reply, &fu.bestmove, &side, "mistake",
-                                                );
-                                            }
-                                        }
-                                    }
-                                    let mut st = state_thread.lock().unwrap();
-                                    let event = TrainingEventRecord {
-                                        id: format!("evt_{}", uuid_now()),
-                                        user_id: "default_user".to_string(),
-                                        kind: "mistake_tree".to_string(),
-                                        target_id: game_id_thread.clone(),
-                                        outcome: format!("worst drop {loss}cp at ply {}", pos_record.ply),
-                                        score_delta: 0.0,
-                                        created_at: tree::local_now_str(),
-                                    };
-                                    let _ = st.db.insert_training_event(&event);
-                                }
-                                Err(e) => {
-                                    eprintln!("mistake-tree: failed to insert correction edge for game {}: {}", game_id_thread, e);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Trigger UI refresh
-                let _ = slint::invoke_from_event_loop(move || {
-                    refresh_thread();
-                });
-            });
-
-            // Local updates
-            drop(state_lock);
-            refresh_data_cp();
+            import_and_analyze_pgn(&state, &app_weak, &refresh_data_cp, &pgn_text, true);
         });
     }
 
@@ -2507,6 +2688,7 @@ fn main() {
     {
         let state = state.clone();
         let app_weak = app_weak.clone();
+        let refresh_data = refresh_data.clone();
         app.on_play_click_square(move |idx: i32| {
             let mut st = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
@@ -2590,7 +2772,11 @@ fn main() {
 
             use shakmaty::Position;
             if st.play_chess.is_game_over() {
-                finish_play_game(&mut st, &app, "Game over");
+                let pgn = finish_play_game(&mut st, &app, "Game over");
+                drop(st);
+                if let Some(pgn) = pgn {
+                    import_and_analyze_pgn(&state, &app_weak, &refresh_data, &pgn, false);
+                }
                 return;
             }
             let msg = bot_take_turn(&mut st, &app);
@@ -2600,7 +2786,11 @@ fn main() {
             };
             app.set_play_status(slint::SharedString::from(msg));
             if ended {
-                finish_play_game(&mut st, &app, "Game over");
+                let pgn = finish_play_game(&mut st, &app, "Game over");
+                drop(st);
+                if let Some(pgn) = pgn {
+                    import_and_analyze_pgn(&state, &app_weak, &refresh_data, &pgn, false);
+                }
             }
         });
     }
@@ -2609,10 +2799,36 @@ fn main() {
     {
         let state = state.clone();
         let app_weak = app_weak.clone();
+        let refresh_data = refresh_data.clone();
         app.on_play_resign(move || {
             let mut st = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
-            finish_play_game(&mut st, &app, "Resigned");
+            let pgn = finish_play_game(&mut st, &app, "Resigned");
+            drop(st);
+            if let Some(pgn) = pgn {
+                import_and_analyze_pgn(&state, &app_weak, &refresh_data, &pgn, false);
+            }
+        });
+    }
+
+    {
+        let app_weak = app_weak.clone();
+        app.on_game_review_close(move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_show_game_review_brief(false);
+            }
+        });
+    }
+
+    {
+        let app_weak = app_weak.clone();
+        app.on_game_review_open(move || {
+            if let Some(app) = app_weak.upgrade() {
+                let game_id = app.get_game_review_game_id();
+                app.set_active_screen(slint::SharedString::from("review"));
+                app.invoke_select_game(game_id);
+                app.set_show_game_review_brief(false);
+            }
         });
     }
 
@@ -2624,34 +2840,11 @@ fn main() {
             let st = state.lock().unwrap();
             let moves = st.play_moves_uci.clone();
             let side = st.play_side.clone();
+            let (result_tag, _) = bot_game_outcome(&st.play_chess, &side, false);
             drop(st);
-            if moves.is_empty() { return; }
-            // Rebuild SAN movetext from UCI.
-            use shakmaty::{Chess, Position};
-            use shakmaty::san::San;
-            let mut pos = Chess::default();
-            let mut san_moves: Vec<String> = Vec::new();
-            for uci_str in &moves {
-                let Ok(uci) = uci_str.parse::<Uci>() else { break };
-                let Ok(m) = uci.to_move(&pos) else { break };
-                san_moves.push(San::from_move(&pos, &m).to_string());
-                pos.play_unchecked(&m);
-            }
-            let mut movetext = String::new();
-            for (i, san) in san_moves.iter().enumerate() {
-                if i % 2 == 0 { movetext.push_str(&format!("{}. ", i / 2 + 1)); }
-                movetext.push_str(san);
-                movetext.push(' ');
-            }
-            let user_name = std::env::var("LICHESS_USERNAME")
-                .or_else(|_| std::env::var("CHESSCOM_USERNAME"))
-                .unwrap_or_else(|_| "You".to_string());
-            let (w, b) = if side == "White" { (user_name.as_str(), "Forge Bot") } else { ("Forge Bot", user_name.as_str()) };
-            let pgn = format!(
-                "[Event \"Bot Game\"]\n[White \"{w}\"]\n[Black \"{b}\"]\n[Date \"{}\"]\n[Round \"{}\"]\n\n{movetext}*",
-                tree::local_now_str().replace('-', "."),
-                uuid_now()
-            );
+            let Some(pgn) = build_bot_game_pgn(&moves, &side, result_tag) else {
+                return;
+            };
             if let Some(app) = app_weak.upgrade() {
                 app.invoke_import_pgn(slint::SharedString::from(pgn));
                 app.set_active_screen(slint::SharedString::from("review"));
@@ -2743,8 +2936,11 @@ fn bot_take_turn(state: &mut AppState, app: &AppWindow) -> String {
     format!("Bot played {uci_str}. Your move.")
 }
 
-/// End the bot game: build the summary and leave the moves for optional review.
-fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) {
+/// End the bot game: build the summary, determine the outcome, show the Game
+/// Review Brief (Task 5 wires the Slint side of this), and return the PGN to
+/// auto-analyze — the caller must drop its state lock before importing it
+/// (see the call sites below).
+fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) -> Option<String> {
     app.set_play_active(false);
     let total = state.play_moves_uci.len();
     let mut summary = format!(
@@ -2763,6 +2959,386 @@ fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) {
         ));
     }
     app.set_play_summary(slint::SharedString::from(summary));
+
+    let (result_tag, header) =
+        bot_game_outcome(&state.play_chess, &state.play_side, reason == "Resigned");
+    // A 0-move game has nothing for `build_bot_game_pgn` to return (see below)
+    // and thus nothing for the background analysis thread to ever populate —
+    // opening the Brief here would leave it permanently stuck on "Analyzing…".
+    // Only open it when there's an actual game to analyze.
+    if !state.play_moves_uci.is_empty() {
+        app.set_game_review_result_text(slint::SharedString::from(header));
+        app.set_show_game_review_brief(true);
+        app.set_game_review_game_id(slint::SharedString::from(""));
+        app.set_game_review_stats(slint::ModelRc::from(Rc::new(slint::VecModel::from(Vec::<
+            ReviewStatEntry,
+        >::new(
+        )))));
+        app.set_game_review_accuracy_text(slint::SharedString::from(""));
+        app.set_review_status(slint::SharedString::from("Analyzing with Stockfish..."));
+    }
+
+    build_bot_game_pgn(&state.play_moves_uci, &state.play_side, result_tag)
+}
+
+/// Import a finished/pasted PGN, persist it, and spawn Stockfish analysis in
+/// the background. `switch_to_review` controls whether the UI jumps to the
+/// Review screen immediately (manual "Import & Analyze Game" / "Review This
+/// Game" clicks) or stays put (auto-triggered right after a bot game, where
+/// the Game Review Brief overlay is shown instead — see Task 5).
+fn import_and_analyze_pgn(
+    state: &Arc<Mutex<AppState>>,
+    app_weak: &slint::Weak<AppWindow>,
+    refresh_data_cp: &Arc<impl Fn() + Send + Sync + 'static>,
+    pgn_text: &str,
+    switch_to_review: bool,
+) {
+    if pgn_text.trim().is_empty() {
+        return;
+    }
+
+    let mut state_lock = state.lock().unwrap();
+    let parsed = pgn_processor::parse_pgn(pgn_text);
+
+    let white = parsed
+        .headers
+        .get("White")
+        .cloned()
+        .unwrap_or_else(|| "WhitePlayer".to_string());
+    let black = parsed
+        .headers
+        .get("Black")
+        .cloned()
+        .unwrap_or_else(|| "BlackPlayer".to_string());
+    let date = parsed
+        .headers
+        .get("Date")
+        .cloned()
+        .unwrap_or_else(|| "2026-06-12".to_string());
+    let round = parsed
+        .headers
+        .get("Round")
+        .filter(|r| !r.is_empty() && *r != "?" && *r != "-");
+    let game_id = match round {
+        Some(r) => format!("{}_{}_{}_{}", white, black, date, r).replace(" ", "_"),
+        None => format!("{}_{}_{}", white, black, date).replace(" ", "_"),
+    };
+
+    if let Err(e) = ingest_pgn_game(
+        &mut state_lock.db,
+        &game_id,
+        "Imported PGN",
+        pgn_text,
+        Some(date),
+    ) {
+        drop(state_lock);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_review_status(slint::SharedString::from(format!("Import failed: {e}")));
+        }
+        return;
+    }
+
+    // Trigger background thread to analyze and evaluate this game!
+    let sf_path = state_lock.stockfish_path.clone();
+    let state_thread = state.clone();
+    let refresh_thread = refresh_data_cp.clone();
+    let game_id_thread = game_id.clone();
+    let app_weak_thread = app_weak.clone();
+
+    thread::spawn(move || {
+        let mut sf = match StockfishEngine::new(&sf_path) {
+            Ok(engine) => engine,
+            Err(e) => {
+                let app_weak_error = app_weak_thread.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = app_weak_error.upgrade() {
+                        app.set_review_status(slint::SharedString::from(format!(
+                            "Stockfish failed: {e}"
+                        )));
+                    }
+                });
+                return;
+            }
+        };
+
+        let positions = {
+            let state = state_thread.lock().unwrap();
+            state
+                .db
+                .get_positions_for_game(&game_id_thread)
+                .unwrap_or_default()
+        };
+
+        let mut losses = Vec::new();
+
+        for pos in &positions {
+            let is_book = {
+                let state = state_thread.lock().unwrap();
+                is_book_move(&state.db, &pos.fen, &pos.played_move)
+            };
+            // Analyze position
+            let eval_res = sf.analyze_fen(
+                &pos.fen,
+                AnalysisConfig {
+                    depth: 8,
+                    multipv: 3,
+                },
+            );
+            if let Ok(analysis) = eval_res {
+                if !analysis.variations.is_empty() {
+                    let best_score = score_to_centipawns(analysis.variations[0].score);
+
+                    // Find played move score
+                    let played_score = if analysis.bestmove == pos.played_move {
+                        best_score
+                    } else if let Some(v) = analysis
+                        .variations
+                        .iter()
+                        .find(|var| !var.pv.is_empty() && var.pv[0] == pos.played_move)
+                    {
+                        score_to_centipawns(v.score)
+                    } else {
+                        // Evaluate position after played move
+                        let mut played_chess: Chess = pos
+                            .fen
+                            .parse::<sk_fen::Fen>()
+                            .map(|f| f.into_position(CastlingMode::Standard).unwrap())
+                            .unwrap();
+                        let uci: Uci = pos.played_move.parse().unwrap();
+                        let m = uci.to_move(&played_chess).unwrap();
+                        played_chess.play_unchecked(&m);
+                        let next_fen = shakmaty::fen::Fen::from_position(
+                            played_chess,
+                            shakmaty::EnPassantMode::Always,
+                        )
+                        .to_string();
+
+                        if let Ok(next_analysis) = sf.analyze_fen(
+                            &next_fen,
+                            AnalysisConfig {
+                                depth: 8,
+                                multipv: 1,
+                            },
+                        ) {
+                            if !next_analysis.variations.is_empty() {
+                                // It's the opponent's turn to move now, so invert evaluation
+                                -score_to_centipawns(next_analysis.variations[0].score)
+                            } else {
+                                best_score
+                            }
+                        } else {
+                            best_score
+                        }
+                    };
+
+                    let loss = (best_score - played_score).max(0);
+                    losses.push(loss);
+
+                    let class = Some(format!(
+                        "{:?}",
+                        engine_controller::classify_review_move(
+                            loss,
+                            analysis.bestmove == pos.played_move,
+                            best_score,
+                            is_book,
+                        )
+                    ));
+
+                    // Write result back
+                    let mut state = state_thread.lock().unwrap();
+                    let mut updated_pos = pos.clone();
+                    updated_pos.centipawn_loss = Some(loss);
+                    updated_pos.mistake_class = class;
+                    let _ = state.db.insert_position(&updated_pos);
+                }
+            } else {
+                losses.push(0);
+            }
+        }
+
+        // Compute and persist phase-based accuracy
+        let acc_input: Vec<(u32, Option<i32>)> = positions
+            .iter()
+            .zip(losses.iter())
+            .map(|(pos, &loss)| (pos.ply, Some(loss)))
+            .collect();
+        let acc = accuracy::compute_game_accuracy(&acc_input);
+        {
+            let mut state = state_thread.lock().unwrap();
+            let _ = state.db.update_game_accuracy(
+                &game_id_thread,
+                acc.overall,
+                acc.opening,
+                acc.middlegame,
+                acc.endgame,
+            );
+        }
+
+        // Mistake tree: worst USER eval drop -> best move, top-3 replies, follow-ups.
+        let user_side = tree::user_side_for_game(&white, &black);
+        let worst = positions
+            .iter()
+            .zip(losses.iter())
+            .filter(|(pos, _)| match &user_side {
+                // ply 1,3,5.. = White's moves (odd plies)
+                Some(s) => (pos.ply % 2 == 1) == (s == "White"),
+                None => true,
+            })
+            .max_by_key(|(_, loss)| **loss);
+        if let Some((pos_record, &loss)) = worst {
+            if loss >= 60 {
+                let mover_is_white = pos_record.fen.split_whitespace().nth(1) == Some("w");
+                let side = if mover_is_white { "White" } else { "Black" }.to_string();
+                // 1) correction (my move)
+                if let Ok(root_analysis) = sf.analyze_fen(
+                    &pos_record.fen,
+                    AnalysisConfig {
+                        depth: 12,
+                        multipv: 1,
+                    },
+                ) {
+                    let best = root_analysis.bestmove.clone();
+                    let mut st = state_thread.lock().unwrap();
+                    match tree::add_move_edge(&mut st.db, &pos_record.fen, &best, &side, "mistake")
+                    {
+                        Ok((_, after_best, _)) => {
+                            drop(st);
+                            // 2) top-3 opponent replies
+                            if let Ok(reply_analysis) = sf.analyze_fen(
+                                &after_best,
+                                AnalysisConfig {
+                                    depth: 10,
+                                    multipv: 3,
+                                },
+                            ) {
+                                let mut seen = std::collections::HashSet::new();
+                                for var in reply_analysis.variations.iter().take(3) {
+                                    let Some(reply) = var.pv.first() else {
+                                        continue;
+                                    };
+                                    if !seen.insert(reply.clone()) {
+                                        continue;
+                                    }
+                                    let mut st = state_thread.lock().unwrap();
+                                    let Ok((_, after_reply, _)) = tree::add_move_edge(
+                                        &mut st.db,
+                                        &after_best,
+                                        reply,
+                                        &side,
+                                        "mistake",
+                                    ) else {
+                                        continue;
+                                    };
+                                    drop(st);
+                                    // 3) my best follow-up to each reply
+                                    if let Ok(fu) = sf.analyze_fen(
+                                        &after_reply,
+                                        AnalysisConfig {
+                                            depth: 10,
+                                            multipv: 1,
+                                        },
+                                    ) {
+                                        let mut st = state_thread.lock().unwrap();
+                                        let _ = tree::add_move_edge(
+                                            &mut st.db,
+                                            &after_reply,
+                                            &fu.bestmove,
+                                            &side,
+                                            "mistake",
+                                        );
+                                    }
+                                }
+                            }
+                            let mut st = state_thread.lock().unwrap();
+                            let event = TrainingEventRecord {
+                                id: format!("evt_{}", uuid_now()),
+                                user_id: "default_user".to_string(),
+                                kind: "mistake_tree".to_string(),
+                                target_id: game_id_thread.clone(),
+                                outcome: format!("worst drop {loss}cp at ply {}", pos_record.ply),
+                                score_delta: 0.0,
+                                created_at: tree::local_now_str(),
+                            };
+                            let _ = st.db.insert_training_event(&event);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "mistake-tree: failed to insert correction edge for game {}: {}",
+                                game_id_thread, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let updated_positions = {
+            let state = state_thread.lock().unwrap();
+            state
+                .db
+                .get_positions_for_game(&game_id_thread)
+                .unwrap_or_default()
+        };
+        let class_names: Vec<&str> = updated_positions
+            .iter()
+            .filter_map(|pos| pos.mistake_class.as_deref())
+            .collect();
+        let stats = review_stat_entries(&class_names);
+        let accuracy = {
+            let state = state_thread.lock().unwrap();
+            state
+                .db
+                .conn
+                .query_row(
+                    "SELECT accuracy_overall FROM games WHERE id = ?1",
+                    [game_id_thread.as_str()],
+                    |row| row.get::<_, Option<f64>>(0),
+                )
+                .ok()
+                .flatten()
+                .map(|value| value as f32)
+        };
+        let accuracy_text = accuracy_summary_text(accuracy);
+
+        // Trigger UI refresh
+        let _ = slint::invoke_from_event_loop(move || {
+            refresh_thread();
+            if let Some(app) = app_weak_thread.upgrade() {
+                app.invoke_select_game(slint::SharedString::from(game_id_thread.clone()));
+                let brief_open = app.get_show_game_review_brief();
+                let brief_id = app.get_game_review_game_id();
+                if brief_open && brief_id.is_empty() {
+                    // First population right after auto-trigger: record which
+                    // game this open brief refers to.
+                    app.set_game_review_game_id(slint::SharedString::from(game_id_thread.clone()));
+                }
+                // Only overwrite the stat grid/accuracy text if the open brief is
+                // either unattributed yet or already attributed to *this* game —
+                // otherwise a slow background analysis for game A can clobber a
+                // Brief that a Task 6 "Review" click (or another import) has since
+                // repointed at a different game B.
+                if brief_open
+                    && (brief_id.is_empty() || brief_id.as_str() == game_id_thread.as_str())
+                {
+                    app.set_game_review_stats(slint::ModelRc::from(Rc::new(
+                        slint::VecModel::from(stats),
+                    )));
+                    app.set_game_review_accuracy_text(slint::SharedString::from(accuracy_text));
+                }
+            }
+        });
+    });
+
+    // Local updates
+    drop(state_lock);
+    refresh_data_cp();
+    if let Some(app) = app_weak.upgrade() {
+        if switch_to_review {
+            app.set_active_screen(slint::SharedString::from("review"));
+        }
+        app.set_review_status(slint::SharedString::from("Analyzing with Stockfish..."));
+        app.invoke_select_game(slint::SharedString::from(game_id));
+    }
 }
 
 /// Advance the drill: auto-play opponent edges, load expected my-moves, detect session end.
@@ -2825,7 +3401,11 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
 
 #[cfg(test)]
 mod tests {
-    use super::fen_to_pieces;
+    use super::{
+        accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, fen_to_pieces,
+        game_review_summary, review_stat_entries, sk_fen,
+    };
+    use shakmaty::{CastlingMode, Chess};
 
     #[test]
     fn fen_to_pieces_preserves_piece_side_codes() {
@@ -2836,6 +3416,122 @@ mod tests {
         assert_eq!(as_strings[48], "P");
         assert_eq!(as_strings[56], "K");
         assert_eq!(as_strings[63], "");
+    }
+
+    #[test]
+    fn game_review_summary_lists_accuracy_elo_and_move_counts() {
+        let summary = game_review_summary(
+            Some(87.4),
+            &[
+                "Book",
+                "Blunder",
+                "Mistake",
+                "Miss",
+                "Good",
+                "Excellent",
+                "Best",
+                "Great",
+                "Brilliant",
+            ],
+        );
+
+        assert!(summary.contains("Accuracy 87%"));
+        assert!(summary.contains("Est. Elo 2300"));
+        assert!(summary.contains("Book 1"));
+        assert!(summary.contains("Blunder 1"));
+        assert!(summary.contains("Mistake 1"));
+        assert!(summary.contains("Miss 1"));
+        assert!(summary.contains("Good 1"));
+        assert!(summary.contains("Excellent 1"));
+        assert!(summary.contains("Best 1"));
+        assert!(summary.contains("Great 1"));
+        assert!(summary.contains("Brilliant 1"));
+    }
+
+    #[test]
+    fn bot_game_outcome_reports_win_from_the_users_perspective() {
+        // Fool's mate: 1. f3 e5 2. g4 Qh4# — White is checkmated.
+        let chess: Chess = "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 3"
+            .parse::<sk_fen::Fen>()
+            .unwrap()
+            .into_position(CastlingMode::Standard)
+            .unwrap();
+
+        let (tag, header) = bot_game_outcome(&chess, "White", false);
+        assert_eq!(tag, "0-1");
+        assert_eq!(header, "Forge Bot won");
+
+        let (tag, header) = bot_game_outcome(&chess, "Black", false);
+        assert_eq!(tag, "0-1");
+        assert_eq!(header, "You beat Forge Bot!");
+    }
+
+    #[test]
+    fn bot_game_outcome_resignation_always_credits_the_other_side() {
+        let chess = Chess::default();
+
+        let (tag, header) = bot_game_outcome(&chess, "White", true);
+        assert_eq!(tag, "0-1");
+        assert_eq!(header, "Forge Bot won");
+
+        let (tag, header) = bot_game_outcome(&chess, "Black", true);
+        assert_eq!(tag, "1-0");
+        assert_eq!(header, "Forge Bot won");
+    }
+
+    #[test]
+    fn bot_game_outcome_unfinished_position_is_unresolved() {
+        let chess = Chess::default();
+        let (tag, header) = bot_game_outcome(&chess, "White", false);
+        assert_eq!(tag, "*");
+        assert_eq!(header, "Game over");
+    }
+
+    #[test]
+    fn build_bot_game_pgn_embeds_the_real_result_tag() {
+        let moves = vec!["e2e4".to_string(), "e7e5".to_string()];
+        let pgn = build_bot_game_pgn(&moves, "White", "1-0").unwrap();
+        assert!(pgn.contains("1. e4 e5 1-0"));
+        assert!(!pgn.trim_end().ends_with('*'));
+    }
+
+    #[test]
+    fn build_bot_game_pgn_returns_none_for_an_empty_game() {
+        assert!(build_bot_game_pgn(&[], "White", "*").is_none());
+    }
+
+    #[test]
+    fn review_stat_entries_lists_only_nonzero_categories_in_display_order() {
+        let entries = review_stat_entries(&["Book", "Book", "Blunder", "Best"]);
+        let as_pairs: Vec<(String, i32)> = entries
+            .into_iter()
+            .map(|e| (e.label.to_string(), e.count))
+            .collect();
+        assert_eq!(
+            as_pairs,
+            vec![
+                ("Best".to_string(), 1),
+                ("Book".to_string(), 2),
+                ("Blunder".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn review_stat_entries_empty_for_no_classified_moves() {
+        assert!(review_stat_entries(&[]).is_empty());
+    }
+
+    #[test]
+    fn accuracy_summary_text_matches_existing_format() {
+        assert_eq!(
+            accuracy_summary_text(Some(87.4)),
+            "Accuracy 87% | Est. Elo 2300"
+        );
+        assert_eq!(
+            accuracy_summary_text(None),
+            "Accuracy pending | Est. Elo pending"
+        );
     }
 }
 
