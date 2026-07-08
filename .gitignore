@@ -12,12 +12,14 @@ Cargo.lock
 graphify-out/
 .firecrawl/
 CLAUDE.md
+PROJECT_TRACKER.md
 
 # Logs
 *.log
 
 # Local runtime database (created by the app at startup)
 *.db
+*.db.bak-*
 
 # OS generated files
 .DS_Store
