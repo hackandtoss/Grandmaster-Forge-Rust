@@ -4,6 +4,12 @@
 **Status:** Approved by user (brainstorming dialogue, all sections)
 **Accounts:** Lichess `hackandtoss` (token in `.env` as `LICHESS_API_KEY`), Chess.com `ElectricMindGames` (public API, no token)
 
+> **Repo drift notice (2026-07-07): BASELINE SPEC.**
+> This spec remains the source for the graph migration, multi-source import, and book-bot baseline. It is not the final opening UX.
+> Current opening direction is Course -> Chapter -> Named Line -> Graph Path, with ChessReps-style catalog/practice UI backed by this graph; see `2026-07-07-opening-course-graph-design.md`.
+> SM-2 in this spec is current-state scheduling. FSRS is the target replacement once the review/event model is ready.
+> Normalized FEN remains canonical; any future Zobrist key is an index/cache, not a separate identity model.
+
 ## Goal
 
 Complete Grandmaster Forge into a system that (1) imports the user's games from

@@ -4,6 +4,12 @@
 >
 > **Code exploration rule:** graphify-out/graph.json exists in this repo. Run `graphify query "<question>"` before reading source files; read raw files only after graphify has oriented you or to modify specific lines. After each task's code changes, run `graphify update .`.
 
+> **Repo drift notice (2026-07-07): HISTORICAL/COMPLETED BASELINE PLAN.**
+> This plan describes the completed migration from flat opening lines to the position graph. Use it for context, not as the next implementation plan.
+> New opening work should build on top of the graph with course/chapter/named-line metadata; see `docs/superpowers/specs/2026-07-07-opening-course-graph-design.md`.
+> SM-2 references here describe the current implemented baseline only. Future scheduling work should replace SM-2 with FSRS rather than layering a second scheduler beside it.
+> Bot-book and drill logic should remain graph-backed; course-specific practice filters graph paths instead of creating a separate flat book.
+
 **Goal:** Turn Grandmaster Forge's flat repertoire into a position-tree with per-move SM-2, feed it from five sources (PGN paste, Lichess studies, explorer adopt, mistake generation, manual builder), sync games from chess.com as well as Lichess, and add a Play-vs-Bot mode that plays the user's book before handing off to Elo-limited Stockfish.
 
 **Architecture:** New `repertoire_nodes`/`repertoire_moves` tables in `db_manager` (positions keyed by normalized FEN, SM-2 state per my-move edge). Position walking (SAN/UCI/FEN) stays in crates that already have shakmaty (`pgn_processor`, `app`). New `chesscom_client` crate mirrors `lichess_client`. `engine_controller` gains a persistent `PlaySession`. The `app` crate wires everything through new Slint screens, following the existing background-thread + `slint::invoke_from_event_loop` pattern.
