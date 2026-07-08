@@ -3286,15 +3286,26 @@ fn import_and_analyze_pgn(
             refresh_thread();
             if let Some(app) = app_weak_thread.upgrade() {
                 app.invoke_select_game(slint::SharedString::from(game_id_thread.clone()));
-                if app.get_show_game_review_brief() && app.get_game_review_game_id().is_empty() {
+                let brief_open = app.get_show_game_review_brief();
+                let brief_id = app.get_game_review_game_id();
+                if brief_open && brief_id.is_empty() {
                     // First population right after auto-trigger: record which
                     // game this open brief refers to.
-                    app.set_game_review_game_id(slint::SharedString::from(game_id_thread));
+                    app.set_game_review_game_id(slint::SharedString::from(game_id_thread.clone()));
                 }
-                app.set_game_review_stats(slint::ModelRc::from(Rc::new(slint::VecModel::from(
-                    stats,
-                ))));
-                app.set_game_review_accuracy_text(slint::SharedString::from(accuracy_text));
+                // Only overwrite the stat grid/accuracy text if the open brief is
+                // either unattributed yet or already attributed to *this* game —
+                // otherwise a slow background analysis for game A can clobber a
+                // Brief that a Task 6 "Review" click (or another import) has since
+                // repointed at a different game B.
+                if brief_open
+                    && (brief_id.is_empty() || brief_id.as_str() == game_id_thread.as_str())
+                {
+                    app.set_game_review_stats(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                        stats,
+                    ))));
+                    app.set_game_review_accuracy_text(slint::SharedString::from(accuracy_text));
+                }
             }
         });
     });
