@@ -184,8 +184,8 @@ git clone <repo>
 cd Grandmaster-Forge-Rust
 cargo build --release
 
-# Create .env with your Lichess API token
-echo "LICHESS_API_KEY=lip_yourtoken" > .env
+# Create .env and fill in your local values
+cp .env.example .env
 
 # Run
 cargo run --release -p app
@@ -201,6 +201,7 @@ cargo run --release -p app
 | `LICHESS_USERNAME` | Your Lichess username, used to sync your games/studies |
 | `CHESSCOM_USERNAME` | Your Chess.com username, used to pull monthly archives |
 | `CHESSCOM_USER_AGENT` | Contact User-Agent string required by the Chess.com public API (e.g. `Forge/1.0 you@example.com`) |
+| `STOCKFISH_PATH` | Optional path to a Stockfish binary; otherwise the app tries `stockfish` on PATH |
 
 ---
 
@@ -208,5 +209,5 @@ cargo run --release -p app
 
 ```bash
 cargo test --workspace
-# 48 tests across db_manager, app (srs, accuracy, weakness, tree), engine_controller, lichess_client, chesscom_client, pgn_processor
+# 61 tests across db_manager, app (srs, accuracy, weakness, tree), engine_controller, lichess_client, chesscom_client, pgn_processor
 ```

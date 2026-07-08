@@ -1,9 +1,6 @@
 # Rust build artifacts
 target/
 
-# Cargo lock file (optional, but often ignored in workspaces)
-Cargo.lock
-
 # Environment variables
 .env
 
