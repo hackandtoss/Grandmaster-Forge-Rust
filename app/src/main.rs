@@ -1275,7 +1275,15 @@ fn game_review_summary(accuracy: Option<f32>, classes: &[&str]) -> String {
 /// variants exactly (there is no "Perfect" class).
 fn review_stat_entries(classes: &[&str]) -> Vec<ReviewStatEntry> {
     const ORDER: [&str; 9] = [
-        "Best", "Book", "Blunder", "Brilliant", "Excellent", "Good", "Great", "Miss", "Mistake",
+        "Best",
+        "Book",
+        "Blunder",
+        "Brilliant",
+        "Excellent",
+        "Good",
+        "Great",
+        "Miss",
+        "Mistake",
     ];
     ORDER
         .iter()
@@ -1302,9 +1310,17 @@ fn bot_game_outcome(chess: &Chess, side: &str, resigned: bool) -> (&'static str,
     }
     match chess.outcome() {
         Some(shakmaty::Outcome::Decisive { winner }) => {
-            let tag = if winner == shakmaty::Color::White { "1-0" } else { "0-1" };
+            let tag = if winner == shakmaty::Color::White {
+                "1-0"
+            } else {
+                "0-1"
+            };
             let user_won = (winner == shakmaty::Color::White) == (side == "White");
-            let header = if user_won { "You beat Forge Bot!" } else { "Forge Bot won" };
+            let header = if user_won {
+                "You beat Forge Bot!"
+            } else {
+                "Forge Bot won"
+            };
             (tag, header)
         }
         Some(shakmaty::Outcome::Draw) => ("1/2-1/2", "Draw"),
@@ -1320,7 +1336,9 @@ fn build_bot_game_pgn(moves: &[String], side: &str, result_tag: &str) -> Option<
     let mut pos = Chess::default();
     let mut san_moves: Vec<String> = Vec::new();
     for uci_str in moves {
-        let Ok(uci) = uci_str.parse::<Uci>() else { break };
+        let Ok(uci) = uci_str.parse::<Uci>() else {
+            break;
+        };
         let Ok(m) = uci.to_move(&pos) else { break };
         san_moves.push(San::from_move(&pos, &m).to_string());
         pos.play_unchecked(&m);
@@ -2952,9 +2970,10 @@ fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) -> Opti
         app.set_game_review_result_text(slint::SharedString::from(header));
         app.set_show_game_review_brief(true);
         app.set_game_review_game_id(slint::SharedString::from(""));
-        app.set_game_review_stats(slint::ModelRc::from(Rc::new(slint::VecModel::from(
-            Vec::<ReviewStatEntry>::new(),
-        ))));
+        app.set_game_review_stats(slint::ModelRc::from(Rc::new(slint::VecModel::from(Vec::<
+            ReviewStatEntry,
+        >::new(
+        )))));
         app.set_game_review_accuracy_text(slint::SharedString::from(""));
         app.set_review_status(slint::SharedString::from("Analyzing with Stockfish..."));
     }
@@ -3301,9 +3320,9 @@ fn import_and_analyze_pgn(
                 if brief_open
                     && (brief_id.is_empty() || brief_id.as_str() == game_id_thread.as_str())
                 {
-                    app.set_game_review_stats(slint::ModelRc::from(Rc::new(slint::VecModel::from(
-                        stats,
-                    ))));
+                    app.set_game_review_stats(slint::ModelRc::from(Rc::new(
+                        slint::VecModel::from(stats),
+                    )));
                     app.set_game_review_accuracy_text(slint::SharedString::from(accuracy_text));
                 }
             }
