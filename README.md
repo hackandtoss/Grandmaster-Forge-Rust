@@ -4,6 +4,21 @@ A Rust desktop chess training platform combining ideas from Lichess, Chess.com, 
 
 ---
 
+## Product Vision
+
+Grandmaster Forge is a local-first chess trainer: fast, private, and built around the user's own games. The long-term goal is not just to store opening lines, but to identify repeated tactical failures, explain them with deterministic chess geometry, and feed those exact positions back into spaced repetition.
+
+Core rules:
+- Use `shakmaty` for board legality, SAN/UCI, FEN, and position handling; do not invent a custom board model.
+- Treat repertoires as a transposition-aware position graph, not a move tree.
+- Use Stockfish/UCI for evaluation truth. Use heuristics for human-readable tactical labels. Do not use LLMs for move evaluation or chess explanations.
+- Keep UI work responsive; engine analysis and sync work stay off the UI path.
+- Prefer the current SQLite/rusqlite store until a measured bottleneck justifies a database migration.
+
+Near-term direction: add a tactical scrutinizer on top of the existing game-review and mistake-tree pipeline, then migrate the learning scheduler from SM-2 to FSRS once the review/event model is stable.
+
+---
+
 ## Features
 
 ### Opening Repertoire Builder
@@ -63,6 +78,12 @@ A Rust desktop chess training platform combining ideas from Lichess, Chess.com, 
 - Flags endgame weakness when endgame accuracy < 70%
 - Dashboard shows top training priority
 
+### Tactical Learning Loop (Planned)
+- Engine review finds the positions where the user's evaluation drops
+- A deterministic tactical scrutinizer labels likely motifs such as hanging pieces, pins, forks, skewers, overloaded defenders, and back-rank problems
+- Tactical tags become study metadata for the existing mistake-tree and drill queues
+- Weakness clustering should start with simple counts/rates; add `linfa` only after enough labeled positions exist to justify clustering
+
 ### Lichess Sync
 - Streams up to 50 recent games via Lichess NDJSON API in a background thread
 - Deduplication via the per-source `game_sync` ledger — already-synced games are skipped
@@ -113,6 +134,11 @@ Grandmaster-Forge-Rust/
 | HTTP / async | reqwest 0.12, tokio rt-multi-thread |
 | NDJSON streaming | futures-util 0.3 |
 | Environment | dotenvy 0.15 |
+
+Planned learning upgrades:
+- FSRS replaces SM-2 as the scheduling algorithm when the app has enough review outcomes to tune intervals usefully.
+- Zobrist hashes may be added as a cached/indexed position key if normalized-FEN lookups become a measured hot path; the semantic model remains "same position, same node."
+- `linfa` may be added for weakness clustering after tactical labels are being collected consistently.
 
 ---
 

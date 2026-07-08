@@ -2,6 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Repo drift notice (2026-07-07): HISTORICAL PLAN. Do not execute this plan verbatim.**
+> This June plan predates the actual repository state and has been superseded by the July repertoire-tree work plus the newer specs in `docs/superpowers/specs/`.
+> In particular, do **not** rebuild flat `opening_lines` scheduling, do **not** add Firecrawl/ScrapeGraphAI scraping, and do **not** design new opening work around line rows.
+> Current direction:
+> - Use the existing `repertoire_nodes` / `repertoire_moves` position graph.
+> - Organize openings as Course -> Chapter -> Named Line -> Graph Path; see `docs/superpowers/specs/2026-07-07-opening-course-graph-design.md`.
+> - SM-2 is the current implemented scheduler, but FSRS is the target replacement; see `docs/superpowers/specs/2026-07-07-learning-scheduler-and-position-identity-design.md`.
+> - Keep `rusqlite`/SQLite until profiling proves otherwise.
+> - Use deterministic Stockfish + geometry labels for explanations; no LLM chess evaluation.
+
 **Goal:** Evolve Grandmaster Forge from a PGN-paste prototype into a full chess training platform combining Lichess auto-import, SM-2 spaced repetition, per-phase accuracy scoring, and an opening tree explorer — inspired by Lichess, Chess.com, AIMchess, ChessReps, and ChessIgma.
 
 **Architecture:** Four independent subsystems wired into the existing Rust workspace (`engine_controller`, `pgn_processor`, `db_manager`, `mastery_ui`, `app`). A new `lichess_client` crate handles all HTTP calls. The DB schema gains SRS scheduling columns and an opening-tree table. The Slint GUI gains new screens and a data-refresh hook for live Lichess sync.
