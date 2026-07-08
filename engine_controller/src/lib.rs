@@ -3,11 +3,19 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MistakeClass {
-    Inaccuracy,
+pub enum MoveClass {
+    Book,
+    Brilliant,
+    Best,
+    Great,
+    Excellent,
+    Good,
+    Miss,
     Mistake,
     Blunder,
 }
+
+pub type MistakeClass = MoveClass;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Score {
@@ -255,15 +263,42 @@ impl PlaySession {
     }
 }
 
-pub fn classify_centipawn_loss(loss: i32) -> Option<MistakeClass> {
+pub fn classify_centipawn_loss(loss: i32) -> MoveClass {
     if loss >= 250 {
-        Some(MistakeClass::Blunder)
+        MoveClass::Blunder
     } else if loss >= 120 {
-        Some(MistakeClass::Mistake)
+        MoveClass::Mistake
     } else if loss >= 60 {
-        Some(MistakeClass::Inaccuracy)
+        MoveClass::Miss
+    } else if loss >= 21 {
+        MoveClass::Good
+    } else if loss >= 11 {
+        MoveClass::Excellent
+    } else if loss >= 1 {
+        MoveClass::Great
     } else {
-        None
+        MoveClass::Best
+    }
+}
+
+pub fn classify_move(loss: i32, played_is_best: bool, best_score: i32) -> MoveClass {
+    if loss == 0 && played_is_best && best_score >= 800 {
+        MoveClass::Brilliant
+    } else {
+        classify_centipawn_loss(loss)
+    }
+}
+
+pub fn classify_review_move(
+    loss: i32,
+    played_is_best: bool,
+    best_score: i32,
+    is_book: bool,
+) -> MoveClass {
+    if is_book {
+        MoveClass::Book
+    } else {
+        classify_move(loss, played_is_best, best_score)
     }
 }
 
@@ -314,11 +349,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_loss_bands() {
-        assert_eq!(classify_centipawn_loss(59), None);
-        assert_eq!(classify_centipawn_loss(60), Some(MistakeClass::Inaccuracy));
-        assert_eq!(classify_centipawn_loss(120), Some(MistakeClass::Mistake));
-        assert_eq!(classify_centipawn_loss(250), Some(MistakeClass::Blunder));
+    fn classifies_chesscom_style_move_labels() {
+        assert_eq!(classify_review_move(30, true, 0, true), MoveClass::Book);
+        assert_eq!(classify_centipawn_loss(0), MoveClass::Best);
+        assert_eq!(classify_move(8, false, 0), MoveClass::Great);
+        assert_eq!(classify_centipawn_loss(20), MoveClass::Excellent);
+        assert_eq!(classify_centipawn_loss(59), MoveClass::Good);
+        assert_eq!(classify_centipawn_loss(60), MoveClass::Miss);
+        assert_eq!(classify_centipawn_loss(120), MoveClass::Mistake);
+        assert_eq!(classify_centipawn_loss(250), MoveClass::Blunder);
+    }
+
+    #[test]
+    fn only_engine_best_decisive_moves_are_brilliant() {
+        assert_eq!(classify_move(0, true, 800), MoveClass::Brilliant);
+        assert_eq!(classify_move(0, true, 200), MoveClass::Best);
+        assert_eq!(classify_move(0, false, 800), MoveClass::Best);
     }
 
     #[test]

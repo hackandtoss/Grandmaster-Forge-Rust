@@ -1708,7 +1708,10 @@ fn main() {
                             let loss = (best_score - played_score).max(0);
                             losses.push(loss);
 
-                            let class = engine_controller::classify_centipawn_loss(loss).map(|c| format!("{:?}", c));
+                            let class = Some(format!(
+                                "{:?}",
+                                engine_controller::classify_centipawn_loss(loss)
+                            ));
 
                             // Write result back
                             let mut state = state_thread.lock().unwrap();
