@@ -100,8 +100,11 @@ Near-term direction: add a tactical scrutinizer on top of the existing game-revi
 - Nodes stored in `opening_tree` table with win/draw/loss counts
 
 ### Puzzle Training
-- Puzzles stored in DB with FEN, solution UCI, theme, and difficulty
-- `load-puzzle` callback picks a random puzzle up to a difficulty ceiling and sets up the board
+- Dedicated Puzzle Trainer screen: random puzzle on the interactive board, two-click move entry, per-move feedback against the stored solution line, and a "Show Solution" reveal (rendered as SAN)
+- Puzzles stored in DB with FEN, solution UCI line, theme, and difficulty; `load-puzzle` picks a random puzzle up to a difficulty ceiling
+- Five built-in starter mate puzzles are seeded idempotently on launch so the trainer works before any puzzle import exists
+- Pass/fail is recorded once per puzzle to `training_events` (kind `puzzle`); the stored value is the updated puzzle rating, which feeds the dashboard's Training Rating stat
+- Dashboard "Start Activity" routes the PuzzleRush recommendation to the Puzzle Trainer
 
 ---
 
@@ -209,5 +212,5 @@ cargo run --release -p app
 
 ```bash
 cargo test --workspace
-# 61 tests across db_manager, app (srs, accuracy, weakness, tree), engine_controller, lichess_client, chesscom_client, pgn_processor
+# 66 tests across db_manager, app (srs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client, chesscom_client, pgn_processor
 ```

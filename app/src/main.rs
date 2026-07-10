@@ -4,7 +4,9 @@ mod srs;
 mod tree;
 mod weakness;
 
-use db_manager::{GameRecord, PositionRecord, SqliteStore, TrainingEventRecord, TrainingStore};
+use db_manager::{
+    GameRecord, PositionRecord, PuzzleRecord, SqliteStore, TrainingEventRecord, TrainingStore,
+};
 use engine_controller::{AnalysisConfig, StockfishEngine};
 use shakmaty::san::San;
 use shakmaty::uci::Uci;
@@ -367,6 +369,24 @@ slint::slint! {
         in-out property <bool> play-active: false;
         in-out property <string> play-book-state: "";
 
+        // Puzzle Trainer screen state
+        in-out property <[string]> puzzle-board-pieces: [
+            "r", "n", "b", "q", "k", "b", "n", "r",
+            "p", "p", "p", "p", "p", "p", "p", "p",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
+            "P", "P", "P", "P", "P", "P", "P", "P",
+            "R", "N", "B", "Q", "K", "B", "N", "R"
+        ];
+        in-out property <int> puzzle-selected-square: -1;
+        in-out property <string> puzzle-status: "Press 'New Puzzle' to start.";
+        in-out property <string> puzzle-meta: "";
+        in-out property <string> puzzle-progress: "";
+        in-out property <string> puzzle-solution-text: "";
+        in-out property <bool> puzzle-active: false;
+
         // Callbacks
         callback select-screen(string);
         callback import-lines(string, string);
@@ -397,6 +417,10 @@ slint::slint! {
         callback play-click-square(int);
         callback play-resign();
         callback play-review-game();
+
+        // Puzzle trainer callbacks (load-puzzle above loads a random puzzle)
+        callback puzzle-click-square(int);
+        callback puzzle-show-solution();
 
         HorizontalLayout {
             // Sidebar
@@ -453,6 +477,11 @@ slint::slint! {
                             active: root.active-screen == "play";
                             clicked => { root.select-screen("play"); }
                         }
+                        SidebarButton {
+                            text: "Puzzle Trainer";
+                            active: root.active-screen == "puzzles";
+                            clicked => { root.select-screen("puzzles"); }
+                        }
                     }
                 }
             }
@@ -507,6 +536,8 @@ slint::slint! {
                                             root.select-screen("review");
                                         } else if (root.rec-mode == "OpeningRepetition") {
                                             root.select-screen("repertoire");
+                                        } else if (root.rec-mode == "PuzzleRush") {
+                                            root.select-screen("puzzles");
                                         } else {
                                             root.select-screen("repertoire");
                                         }
@@ -1181,6 +1212,34 @@ slint::slint! {
                     }
                 }
 
+                // 7. Puzzle Trainer Screen
+                if (root.active-screen == "puzzles") : HorizontalLayout {
+                    spacing: 24px;
+                    // Board
+                    ChessBoard {
+                        pieces: root.puzzle-board-pieces;
+                        selected-square: root.puzzle-selected-square;
+                        square-clicked(index) => { root.puzzle-click-square(index); }
+                    }
+                    // Controls
+                    VerticalLayout {
+                        spacing: 12px; alignment: start;
+                        Text { text: "Puzzle Trainer"; color: #ffffff; font-size: 18px; font-weight: 700; }
+                        Button {
+                            text: root.puzzle-active ? "Skip / New Puzzle" : "New Puzzle";
+                            clicked => { root.load-puzzle(); }
+                        }
+                        Text { text: root.puzzle-meta; color: #a78bfa; font-size: 13px; wrap: word-wrap; width: 300px; }
+                        Text { text: root.puzzle-progress; color: #a1a1aa; font-size: 12px; }
+                        Text { text: root.puzzle-status; color: #e4e4e7; font-size: 13px; wrap: word-wrap; width: 300px; }
+                        if (root.puzzle-active) : Button {
+                            text: "Show Solution";
+                            clicked => { root.puzzle-show-solution(); }
+                        }
+                        Text { text: root.puzzle-solution-text; color: #fbbf24; font-size: 13px; wrap: word-wrap; width: 300px; }
+                    }
+                }
+
                 if root.show-game-review-brief : GameReviewBrief {
                     width: 100%;
                     height: 100%;
@@ -1374,6 +1433,107 @@ fn side_to_move_label(fen: &str) -> &'static str {
     }
 }
 
+/// Built-in starter tactics so the Puzzle Trainer has content before any
+/// external puzzle import exists. FEN is the position to solve (solver to
+/// move); `solution_uci` is the full line from the solver's side, alternating
+/// solver moves and scripted opponent replies.
+fn starter_puzzles() -> Vec<PuzzleRecord> {
+    let puzzle = |id: &str, fen: &str, solution: &str, theme: &str, difficulty: i32| PuzzleRecord {
+        id: id.to_string(),
+        fen: fen.to_string(),
+        solution_uci: solution.to_string(),
+        theme: theme.to_string(),
+        difficulty,
+    };
+    vec![
+        puzzle(
+            "seed_scholars_mate",
+            "r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
+            "h5f7",
+            "mateIn1",
+            600,
+        ),
+        puzzle(
+            "seed_back_rank",
+            "6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1",
+            "d1d8",
+            "backRankMate,mateIn1",
+            800,
+        ),
+        puzzle(
+            "seed_smothered",
+            "6rk/6pp/8/6N1/8/8/8/6K1 w - - 0 1",
+            "g5f7",
+            "smotheredMate,mateIn1",
+            900,
+        ),
+        puzzle(
+            "seed_anastasia",
+            "r7/4N1pk/8/8/8/R7/5PPP/6K1 w - - 0 1",
+            "a3h3",
+            "anastasiaMate,mateIn1",
+            1100,
+        ),
+        puzzle(
+            "seed_philidor",
+            "5r1k/6pp/7N/8/8/1Q6/5PP1/6K1 w - - 0 1",
+            "b3g8 f8g8 h6f7",
+            "smotheredMate,mateIn2",
+            1200,
+        ),
+    ]
+}
+
+/// "Move X of Y" counting only the solver's moves (even indices of the
+/// solution line); `index` is the next expected solution index.
+fn puzzle_progress_text(index: usize, total: usize) -> String {
+    format!("Move {} of {}", index / 2 + 1, (total + 1) / 2)
+}
+
+/// `get_puzzle_rating` reads the latest kind='puzzle' `score_delta` as the
+/// current rating, so puzzle events store the absolute updated rating.
+fn updated_puzzle_rating(current: i32, solved: bool) -> i32 {
+    if solved {
+        (current + 10).min(3200)
+    } else {
+        (current - 10).max(400)
+    }
+}
+
+/// Record a pass/fail training event for the current puzzle and fold the
+/// result into the puzzle rating shown on the dashboard.
+fn record_puzzle_event(state: &mut AppState, solved: bool) {
+    let Some(puzzle) = state.puzzle_current.as_ref() else {
+        return;
+    };
+    let current = state.db.get_puzzle_rating("default_user").unwrap_or(1500);
+    let event = TrainingEventRecord {
+        id: format!("evt_{}", uuid_now()),
+        user_id: "default_user".to_string(),
+        kind: "puzzle".to_string(),
+        target_id: puzzle.id.clone(),
+        outcome: if solved { "Correct" } else { "Failed" }.to_string(),
+        score_delta: updated_puzzle_rating(current, solved) as f32,
+        created_at: tree::local_now_str(),
+    };
+    let _ = state.db.insert_training_event(&event);
+}
+
+/// Replay a puzzle's UCI solution from its FEN and render it as SAN.
+/// Returns None if the FEN or any move does not replay legally.
+fn solution_to_san(fen: &str, ucis: &[String]) -> Option<String> {
+    let parsed: sk_fen::Fen = fen.parse().ok()?;
+    let mut pos: Chess = parsed.into_position(CastlingMode::Standard).ok()?;
+    let mut out: Vec<String> = Vec::with_capacity(ucis.len());
+    for uci_str in ucis {
+        let uci: Uci = uci_str.parse().ok()?;
+        let m = uci.to_move(&pos).ok()?;
+        out.push(San::from_move(&pos, &m).to_string());
+        pos.play_unchecked(&m);
+    }
+    Some(out.join(" "))
+}
+
 fn is_book_move(db: &SqliteStore, fen: &str, played_move: &str) -> bool {
     db.get_repertoire_moves_from(fen, side_to_move_label(fen))
         .unwrap_or_default()
@@ -1499,6 +1659,12 @@ struct AppState {
     play_deviations: Vec<String>,
     play_plies_in_book: u32,
     play_left_book_at: Option<u32>,
+    // Puzzle trainer session
+    puzzle_current: Option<PuzzleRecord>,
+    puzzle_chess: Chess,        // current puzzle position (kept in sync with plays)
+    puzzle_solution: Vec<String>, // solution UCI line: solver move, reply, solver move, …
+    puzzle_index: usize,        // next expected index into puzzle_solution
+    puzzle_failed: bool,        // first wrong move / reveal already recorded
 }
 
 fn main() {
@@ -1517,6 +1683,14 @@ fn main() {
     });
     if migrated > 0 {
         println!("Migrated {migrated} legacy opening lines into the repertoire tree.");
+    }
+
+    // Seed built-in starter puzzles so the Puzzle Trainer has content before
+    // any external puzzle import exists. INSERT OR IGNORE keeps this idempotent.
+    for puzzle in starter_puzzles() {
+        if let Err(e) = db.insert_puzzle(&puzzle) {
+            eprintln!("failed to seed starter puzzle {}: {e}", puzzle.id);
+        }
     }
 
     // Load initial data
@@ -1539,6 +1713,11 @@ fn main() {
         play_deviations: Vec::new(),
         play_plies_in_book: 0,
         play_left_book_at: None,
+        puzzle_current: None,
+        puzzle_chess: Chess::default(),
+        puzzle_solution: Vec::new(),
+        puzzle_index: 0,
+        puzzle_failed: false,
     }));
 
     let app = AppWindow::new().expect("failed to create Slint window");
@@ -2205,30 +2384,215 @@ fn main() {
         });
     }
 
-    // Load puzzle callback
+    // Load puzzle callback: picks a random puzzle for the Puzzle Trainer screen.
     {
         let state = state.clone();
         let app_weak = app_weak.clone();
         app.on_load_puzzle(move || {
-            let st = state.lock().unwrap();
-            if let Ok(Some(puzzle)) = st.db.get_next_puzzle(2000) {
-                let fen = puzzle.fen.clone();
-                drop(st);
-                if let Some(app) = app_weak.upgrade() {
-                    let pieces = fen_to_pieces(&fen);
-                    app.set_board_pieces(slint::ModelRc::new(slint::VecModel::from(
-                        pieces
-                            .iter()
-                            .map(|s| slint::SharedString::from(s.as_str()))
-                            .collect::<Vec<_>>(),
+            let mut st = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            match st.db.get_next_puzzle(2000) {
+                Ok(Some(puzzle)) => {
+                    let pos = puzzle
+                        .fen
+                        .parse::<sk_fen::Fen>()
+                        .ok()
+                        .and_then(|f| f.into_position::<Chess>(CastlingMode::Standard).ok());
+                    let Some(pos) = pos else {
+                        app.set_puzzle_status(slint::SharedString::from(format!(
+                            "Puzzle {} has an invalid FEN — press New Puzzle again.",
+                            puzzle.id
+                        )));
+                        return;
+                    };
+                    let solution: Vec<String> = puzzle
+                        .solution_uci
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect();
+                    if solution.is_empty() {
+                        app.set_puzzle_status(slint::SharedString::from(format!(
+                            "Puzzle {} has no stored solution — press New Puzzle again.",
+                            puzzle.id
+                        )));
+                        return;
+                    }
+                    app.set_puzzle_board_pieces(slint::ModelRc::from(Rc::new(
+                        slint::VecModel::from(fen_to_pieces(&puzzle.fen)),
                     )));
-                    app.set_drill_instructions(slint::SharedString::from(format!(
-                        "Puzzle: find the best move ({})",
-                        puzzle.id
+                    app.set_puzzle_selected_square(-1);
+                    app.set_puzzle_meta(slint::SharedString::from(format!(
+                        "{} • rating {}",
+                        puzzle.theme.replace(',', ", "),
+                        puzzle.difficulty
+                    )));
+                    app.set_puzzle_progress(slint::SharedString::from(puzzle_progress_text(
+                        0,
+                        solution.len(),
+                    )));
+                    app.set_puzzle_status(slint::SharedString::from(format!(
+                        "{} to move — find the best move.",
+                        side_to_move_label(&puzzle.fen)
+                    )));
+                    app.set_puzzle_solution_text(slint::SharedString::from(""));
+                    app.set_puzzle_active(true);
+                    st.puzzle_chess = pos;
+                    st.puzzle_solution = solution;
+                    st.puzzle_index = 0;
+                    st.puzzle_failed = false;
+                    st.puzzle_current = Some(puzzle);
+                }
+                Ok(None) => app.set_puzzle_status(slint::SharedString::from(
+                    "No puzzles stored yet — starter puzzles are seeded on launch.",
+                )),
+                Err(e) => app.set_puzzle_status(slint::SharedString::from(format!(
+                    "Failed to load a puzzle: {e}"
+                ))),
+            }
+        });
+    }
+
+    // Puzzle trainer: two-click move entry checked against the stored solution.
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh_data_cp = refresh_data.clone();
+        app.on_puzzle_click_square(move |idx: i32| {
+            let mut st = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            if !app.get_puzzle_active() {
+                return;
+            }
+            let sel = app.get_puzzle_selected_square();
+            if sel == -1 {
+                app.set_puzzle_selected_square(idx);
+                return;
+            }
+            app.set_puzzle_selected_square(-1);
+            let uci_try = format!(
+                "{}{}",
+                index_to_square(sel as usize),
+                index_to_square(idx as usize)
+            );
+            // Legality first (queen-promotion fallback, same as drills/bot play).
+            let mv = uci_try
+                .parse::<Uci>()
+                .ok()
+                .and_then(|u| u.to_move(&st.puzzle_chess).ok())
+                .or_else(|| {
+                    format!("{uci_try}q")
+                        .parse::<Uci>()
+                        .ok()
+                        .and_then(|u| u.to_move(&st.puzzle_chess).ok())
+                });
+            let Some(m) = mv else {
+                app.set_puzzle_status(slint::SharedString::from(
+                    "Illegal move — click one of your pieces, then its destination.",
+                ));
+                return;
+            };
+            let played = Uci::from_move(&m, CastlingMode::Standard).to_string();
+            let Some(expected) = st.puzzle_solution.get(st.puzzle_index).cloned() else {
+                return;
+            };
+            let mut needs_refresh = false;
+            if played != expected {
+                // Legal but wrong: the first miss marks the puzzle failed (once).
+                if !st.puzzle_failed {
+                    st.puzzle_failed = true;
+                    record_puzzle_event(&mut st, false);
+                    needs_refresh = true;
+                }
+                app.set_puzzle_status(slint::SharedString::from(
+                    "Not the best move — try again, or press Show Solution.",
+                ));
+            } else {
+                st.puzzle_chess.play_unchecked(&m);
+                st.puzzle_index += 1;
+                // Auto-play the opponent's scripted reply, if any.
+                if st.puzzle_index < st.puzzle_solution.len() {
+                    let reply = st.puzzle_solution[st.puzzle_index].clone();
+                    let reply_move = reply
+                        .parse::<Uci>()
+                        .ok()
+                        .and_then(|u| u.to_move(&st.puzzle_chess).ok());
+                    let Some(rm) = reply_move else {
+                        // Bad stored data — end the puzzle rather than guessing.
+                        app.set_puzzle_active(false);
+                        app.set_puzzle_status(slint::SharedString::from(format!(
+                            "Puzzle data error: stored reply {reply} is not legal here."
+                        )));
+                        return;
+                    };
+                    st.puzzle_chess.play_unchecked(&rm);
+                    st.puzzle_index += 1;
+                }
+                let fen = shakmaty::fen::Fen::from_position(
+                    st.puzzle_chess.clone(),
+                    shakmaty::EnPassantMode::Legal,
+                )
+                .to_string();
+                app.set_puzzle_board_pieces(slint::ModelRc::from(Rc::new(
+                    slint::VecModel::from(fen_to_pieces(&fen)),
+                )));
+                if st.puzzle_index >= st.puzzle_solution.len() {
+                    app.set_puzzle_active(false);
+                    app.set_puzzle_progress(slint::SharedString::from(""));
+                    app.set_puzzle_status(slint::SharedString::from(if st.puzzle_failed {
+                        "Solved (after a miss) — load the next one!"
+                    } else {
+                        "Solved! Load the next one."
+                    }));
+                    if !st.puzzle_failed {
+                        record_puzzle_event(&mut st, true);
+                        needs_refresh = true;
+                    }
+                } else {
+                    app.set_puzzle_status(slint::SharedString::from("Correct — keep going."));
+                    app.set_puzzle_progress(slint::SharedString::from(puzzle_progress_text(
+                        st.puzzle_index,
+                        st.puzzle_solution.len(),
                     )));
                 }
-            } else {
-                drop(st);
+            }
+            drop(st);
+            if needs_refresh {
+                refresh_data_cp();
+            }
+        });
+    }
+
+    // Puzzle trainer: reveal the solution (counts as a fail).
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh_data_cp = refresh_data.clone();
+        app.on_puzzle_show_solution(move || {
+            let mut st = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            if !app.get_puzzle_active() {
+                return;
+            }
+            let Some(puzzle) = st.puzzle_current.clone() else {
+                return;
+            };
+            let line = solution_to_san(&puzzle.fen, &st.puzzle_solution)
+                .unwrap_or_else(|| puzzle.solution_uci.clone());
+            app.set_puzzle_solution_text(slint::SharedString::from(format!("Solution: {line}")));
+            app.set_puzzle_active(false);
+            app.set_puzzle_progress(slint::SharedString::from(""));
+            app.set_puzzle_status(slint::SharedString::from(
+                "Solution revealed — recorded as failed. Load a new puzzle when ready.",
+            ));
+            let mut needs_refresh = false;
+            if !st.puzzle_failed {
+                st.puzzle_failed = true;
+                record_puzzle_event(&mut st, false);
+                needs_refresh = true;
+            }
+            drop(st);
+            if needs_refresh {
+                refresh_data_cp();
             }
         });
     }
@@ -3403,9 +3767,11 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
 mod tests {
     use super::{
         accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, fen_to_pieces,
-        game_review_summary, review_stat_entries, sk_fen,
+        game_review_summary, puzzle_progress_text, review_stat_entries, sk_fen, solution_to_san,
+        starter_puzzles, updated_puzzle_rating,
     };
-    use shakmaty::{CastlingMode, Chess};
+    use shakmaty::uci::Uci;
+    use shakmaty::{CastlingMode, Chess, Position};
 
     #[test]
     fn fen_to_pieces_preserves_piece_side_codes() {
@@ -3532,6 +3898,74 @@ mod tests {
             accuracy_summary_text(None),
             "Accuracy pending | Est. Elo pending"
         );
+    }
+
+    #[test]
+    fn starter_puzzles_replay_legally_and_end_in_checkmate() {
+        let puzzles = starter_puzzles();
+        assert!(!puzzles.is_empty());
+        for puzzle in puzzles {
+            let parsed: sk_fen::Fen = puzzle
+                .fen
+                .parse()
+                .unwrap_or_else(|e| panic!("{}: bad FEN: {e}", puzzle.id));
+            let mut pos: Chess = parsed
+                .into_position(CastlingMode::Standard)
+                .unwrap_or_else(|e| panic!("{}: illegal position: {e}", puzzle.id));
+            let moves: Vec<&str> = puzzle.solution_uci.split_whitespace().collect();
+            assert!(!moves.is_empty(), "{}: empty solution", puzzle.id);
+            for uci_str in &moves {
+                let uci: Uci = uci_str
+                    .parse()
+                    .unwrap_or_else(|e| panic!("{}: bad UCI {uci_str}: {e}", puzzle.id));
+                let m = uci
+                    .to_move(&pos)
+                    .unwrap_or_else(|e| panic!("{}: illegal move {uci_str}: {e}", puzzle.id));
+                pos = pos
+                    .play(&m)
+                    .unwrap_or_else(|e| panic!("{}: cannot play {uci_str}: {e}", puzzle.id));
+            }
+            assert!(
+                pos.is_checkmate(),
+                "{}: solution should end in checkmate",
+                puzzle.id
+            );
+        }
+    }
+
+    #[test]
+    fn solution_to_san_renders_the_philidor_finish() {
+        let san = solution_to_san(
+            "5r1k/6pp/7N/8/8/1Q6/5PP1/6K1 w - - 0 1",
+            &["b3g8".to_string(), "f8g8".to_string(), "h6f7".to_string()],
+        )
+        .expect("line should replay");
+        assert_eq!(san, "Qg8 Rxg8 Nf7");
+    }
+
+    #[test]
+    fn solution_to_san_rejects_illegal_lines() {
+        assert!(solution_to_san(
+            "6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1",
+            &["d1e3".to_string()]
+        )
+        .is_none());
+        assert!(solution_to_san("not a fen", &["e2e4".to_string()]).is_none());
+    }
+
+    #[test]
+    fn updated_puzzle_rating_moves_up_and_down_with_bounds() {
+        assert_eq!(updated_puzzle_rating(1500, true), 1510);
+        assert_eq!(updated_puzzle_rating(1500, false), 1490);
+        assert_eq!(updated_puzzle_rating(400, false), 400);
+        assert_eq!(updated_puzzle_rating(3200, true), 3200);
+    }
+
+    #[test]
+    fn puzzle_progress_text_counts_solver_moves_only() {
+        assert_eq!(puzzle_progress_text(0, 1), "Move 1 of 1");
+        assert_eq!(puzzle_progress_text(0, 3), "Move 1 of 2");
+        assert_eq!(puzzle_progress_text(2, 3), "Move 2 of 2");
     }
 }
 
