@@ -1661,10 +1661,10 @@ struct AppState {
     play_left_book_at: Option<u32>,
     // Puzzle trainer session
     puzzle_current: Option<PuzzleRecord>,
-    puzzle_chess: Chess,        // current puzzle position (kept in sync with plays)
+    puzzle_chess: Chess, // current puzzle position (kept in sync with plays)
     puzzle_solution: Vec<String>, // solution UCI line: solver move, reply, solver move, …
-    puzzle_index: usize,        // next expected index into puzzle_solution
-    puzzle_failed: bool,        // first wrong move / reveal already recorded
+    puzzle_index: usize, // next expected index into puzzle_solution
+    puzzle_failed: bool, // first wrong move / reveal already recorded
 }
 
 fn main() {
@@ -2532,9 +2532,9 @@ fn main() {
                     shakmaty::EnPassantMode::Legal,
                 )
                 .to_string();
-                app.set_puzzle_board_pieces(slint::ModelRc::from(Rc::new(
-                    slint::VecModel::from(fen_to_pieces(&fen)),
-                )));
+                app.set_puzzle_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                    fen_to_pieces(&fen),
+                ))));
                 if st.puzzle_index >= st.puzzle_solution.len() {
                     app.set_puzzle_active(false);
                     app.set_puzzle_progress(slint::SharedString::from(""));
