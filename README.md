@@ -212,5 +212,5 @@ cargo run --release -p app
 
 ```bash
 cargo test --workspace
-# 66 tests across db_manager, app (srs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client, chesscom_client, pgn_processor
+# 69 tests across db_manager (incl. course metadata/status), app (srs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client, chesscom_client, pgn_processor
 ```
