@@ -14,6 +14,14 @@
 
 This plan implements the first prerequisite for the opening-course spec. It does not redesign the Slint UI and does not route imports into courses yet; that is the next plan.
 
+## Implementation Notes
+
+- Implemented together on 2026-07-10 in `db_manager` with SQLite foreign-key enforcement and cascading metadata deletes.
+- The final CRUD surface includes singular reads and deletes in addition to the upsert/list sketches below.
+- The final status helper makes every specified state reachable: `Undiscovered`, `Learning`, `Learned`, `Mastered`, and `Review Due`.
+- Until FSRS replaces SM-2, two successful repetitions is the `Mastered` stability proxy because that is the existing transition from a one-day to a six-day interval.
+- The code samples below remain the original TDD sketches; the checked implementation and tests are authoritative where they differ.
+
 ## Files
 
 - Modify: `db_manager/src/lib.rs`
@@ -24,7 +32,7 @@ This plan implements the first prerequisite for the opening-course spec. It does
 **Files:**
 - Modify: `db_manager/src/lib.rs`
 
-- [ ] **Step 1: Add failing schema/CRUD tests**
+- [x] **Step 1: Add failing schema/CRUD tests**
 
 Add to `#[cfg(test)] mod tests` in `db_manager/src/lib.rs`:
 
@@ -83,13 +91,13 @@ fn course_chapter_line_crud_round_trip() {
 }
 ```
 
-- [ ] **Step 2: Run failing test**
+- [x] **Step 2: Run failing test**
 
 Run: `cargo test -p db_manager course_chapter_line_crud_round_trip`
 
 Expected: compile failure because `CourseRecord`, `insert_course`, and related helpers do not exist.
 
-- [ ] **Step 3: Add schema**
+- [x] **Step 3: Add schema**
 
 Append these statements to `SQLITE_SCHEMA` in `db_manager/src/lib.rs`:
 
@@ -139,7 +147,7 @@ CREATE TABLE IF NOT EXISTS course_line_moves (
 "#,
 ```
 
-- [ ] **Step 4: Add records and CRUD**
+- [x] **Step 4: Add records and CRUD**
 
 Add near the other record structs:
 
@@ -303,7 +311,7 @@ pub fn get_course_lines(&self, chapter_id: &str) -> Result<Vec<CourseLineRecord>
 }
 ```
 
-- [ ] **Step 5: Run test**
+- [x] **Step 5: Run test**
 
 Run: `cargo test -p db_manager course_chapter_line_crud_round_trip`
 
@@ -321,7 +329,7 @@ git commit -m "feat(db): add opening course metadata tables"
 **Files:**
 - Modify: `db_manager/src/lib.rs`
 
-- [ ] **Step 1: Add failing attachment test**
+- [x] **Step 1: Add failing attachment test**
 
 Add to `db_manager/src/lib.rs` tests:
 
@@ -377,7 +385,7 @@ Run: `cargo test -p db_manager course_line_moves_keep_ordered_required_edges`
 
 Expected: compile failure because methods do not exist.
 
-- [ ] **Step 3: Add helpers**
+- [x] **Step 3: Add helpers**
 
 Add to `impl SqliteStore`:
 
@@ -416,7 +424,7 @@ pub fn get_course_line_moves(&self, line_id: &str) -> Result<Vec<(i64, i32, bool
 }
 ```
 
-- [ ] **Step 4: Run test**
+- [x] **Step 4: Run test**
 
 Run: `cargo test -p db_manager course_line_moves_keep_ordered_required_edges`
 
@@ -434,7 +442,7 @@ git commit -m "feat(db): attach repertoire moves to named course lines"
 **Files:**
 - Modify: `db_manager/src/lib.rs`
 
-- [ ] **Step 1: Add failing status test**
+- [x] **Step 1: Add failing status test**
 
 Add to `db_manager/src/lib.rs` tests:
 
@@ -494,7 +502,7 @@ Run: `cargo test -p db_manager line_status_is_review_due_when_any_required_move_
 
 Expected: compile failure because `course_line_status` does not exist.
 
-- [ ] **Step 3: Add the smallest status helper**
+- [x] **Step 3: Add the smallest status helper**
 
 Add to `impl SqliteStore`:
 
@@ -554,13 +562,13 @@ pub fn course_line_status(&self, line_id: &str, today: &str) -> Result<String, S
 
 Ponytail note: `Weak` is intentionally not in this first helper because the code does not yet have normalized review events/failure counts. Add it after the review-event spine exists.
 
-- [ ] **Step 4: Run test**
+- [x] **Step 4: Run test**
 
 Run: `cargo test -p db_manager line_status_is_review_due_when_any_required_move_is_due`
 
 Expected: pass.
 
-- [ ] **Step 5: Run db tests**
+- [x] **Step 5: Run db tests**
 
 Run: `cargo test -p db_manager`
 
@@ -579,3 +587,10 @@ git commit -m "feat(db): derive named line mastery status from move schedule"
 - Deferred by design: UI, imports, FSRS, `Weak` status, seed course packs.
 - Placeholder scan: no placeholders.
 - Type consistency: `CourseRecord`, `CourseChapterRecord`, `CourseLineRecord`, `set_course_line_moves`, and `course_line_status` are defined before use.
+
+## Completion (2026-07-10)
+
+- Implemented the four metadata tables, course/chapter/line CRUD, and ordered contiguous paths referencing existing `repertoire_moves`.
+- Derived status uses required user-owned moves: one successful repetition is `Learned`, two or more is the temporary `Mastered` proxy, and a due move takes precedence once the line is learned.
+- Deferred: `Weak`, course-level progress aggregation, UI/import routing, FSRS, and Zobrist.
+- Verified: all three focused tests, `cargo test -p db_manager`, `cargo test --workspace`, formatting, and `git diff --check` pass.
