@@ -16,9 +16,11 @@ A dedicated `puzzles` screen in the Slint shell reusing the existing pieces:
 
 ## Gaps Found During Implementation
 
-### 1. No real puzzle ingestion path
+### 1. No real puzzle ingestion path — ADDRESSED 2026-07-10
 
-Nothing populates `puzzles` besides the new starter seeds. `lichess_client::fetch_puzzle` exists but is unwired, and its deserialization expects `puzzle.fen`, while the live Lichess `/api/puzzle/next` response provides the game PGN plus `initialPly` instead of a FEN. Wiring it up needs a small derivation step (replay PGN to `initialPly`, emit FEN) plus a decision on when to fetch (sync-time batch vs on-demand). This is the main blocker between the trainer and real content.
+Original gap: nothing populated `puzzles` besides the starter seeds. `lichess_client::fetch_puzzle` existed but was unwired, and its deserialization expected `puzzle.fen`, while the live Lichess `/api/puzzle/next` response provides the game PGN plus `initialPly` instead of a FEN.
+
+Resolution: `LichessPuzzle` now deserializes the real response shape (verified against the live API), and `lichess_client::puzzles::puzzle_fen_from_pgn` replays the game PGN through `initialPly` with shakmaty to derive the stored FEN (solver to move, `solution_uci` from the solver's side — unchanged conventions). The fetch-timing decision landed as on-demand: a "Fetch Puzzles from Lichess" button on the trainer screen pulls a batch of ~10 on a background thread (same pattern as the sync callbacks) and stores them via the existing `insert_puzzle`, with status messages for a missing `LICHESS_API_KEY` or request failures. Fixture-based tests cover deserialization and FEN derivation; no network in tests.
 
 ### 2. `score_delta` doubles as the absolute puzzle rating
 

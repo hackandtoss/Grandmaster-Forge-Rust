@@ -2590,6 +2590,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "shakmaty",
  "tokio",
  "urlencoding",
 ]
