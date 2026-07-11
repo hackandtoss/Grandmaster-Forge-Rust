@@ -12,7 +12,6 @@ use shakmaty::san::San;
 use shakmaty::uci::Uci;
 use shakmaty::{CastlingMode, Chess, Position};
 use slint::Model;
-use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -35,6 +34,22 @@ slint::slint! {
         moves: string,
         confidence: float,
         start_fen: string,
+        side: string,
+        source: string,
+        line_count: int,
+    }
+
+    struct CourseDetailEntry {
+        id: string,
+        title: string,
+        meta: string,
+        is_chapter: bool,
+    }
+
+    struct CourseTargetEntry {
+        id: string,
+        label: string,
+        side: string,
     }
 
     struct HistoryEntry {
@@ -258,6 +273,42 @@ slint::slint! {
         }
     }
 
+    component CourseTargetPicker inherits Rectangle {
+        in property <[CourseTargetEntry]> targets;
+        in property <string> selected-id;
+        in property <string> side;
+        callback choose(string);
+
+        height: 132px;
+        background: #1a1a1e;
+        border-radius: 8px;
+        border-color: #27272a;
+        border-width: 1px;
+
+        VerticalLayout {
+            padding: 6px;
+            spacing: 6px;
+            ScrollView {
+                VerticalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    Button {
+                        height: 34px;
+                        text: (root.selected-id == "" ? "Selected: " : "")
+                            + "Uncategorized " + root.side + " / Main";
+                        clicked => { root.choose(""); }
+                    }
+                    for target in root.targets: Button {
+                        visible: target.side == root.side || target.side == "Mixed";
+                        height: 34px;
+                        text: (root.selected-id == target.id ? "Selected: " : "") + target.label;
+                        clicked => { root.choose(target.id); }
+                    }
+                }
+            }
+        }
+    }
+
     export component AppWindow inherits Window {
         title: "Grandmaster Forge";
         min-width: 1000px;
@@ -275,7 +326,16 @@ slint::slint! {
         // Lists
         in-out property <[GameEntry]> games: [];
         in-out property <[OpeningLineEntry]> opening-lines: [];
+        in-out property <[CourseDetailEntry]> course-detail: [];
+        in-out property <[CourseTargetEntry]> course-targets: [];
         in-out property <[HistoryEntry]> history: [];
+
+        // Course catalog/detail and shared builder/import target
+        in-out property <string> selected-course-id: "";
+        in-out property <string> selected-course-title: "";
+        in-out property <string> selected-course-progress: "";
+        in-out property <string> builder-target-chapter-id: "";
+        in-out property <string> import-target-chapter-id: "";
 
         // Active screen: "dashboard", "repertoire", "review"
         in-out property <string> active-screen: "dashboard";
@@ -394,6 +454,7 @@ slint::slint! {
         callback import-pgn(string);
         callback select-game(string);
         callback select-game-move(int);
+        callback select-course(string);
         callback select-repertoire-line(string);
         callback click-board-square(int);
         callback start-drill();
@@ -676,48 +737,92 @@ slint::slint! {
                 if (root.active-screen == "repertoire") : HorizontalLayout {
                     spacing: 24px;
 
-                    // Repertoire Line List (Left Column)
+                    // Course catalog / selected course detail (Left Column)
                     VerticalLayout {
-                        width: 380px;
+                        width: 340px;
                         spacing: 12px;
-                        Text {
-                            text: "Active Repertoires";
+
+                        if (root.selected-course-id == "") : Text {
+                            text: "Opening Courses";
                             color: #ffffff;
                             font-size: 18px;
                             font-weight: 700;
                         }
 
-                        Rectangle {
+                        if (root.selected-course-id == "") : Rectangle {
                             background: #1a1a1e;
                             border-radius: 8px;
                             border-color: #27272a;
                             border-width: 1px;
-                            padding: 12px;
 
                             ScrollView {
                                 VerticalLayout {
+                                    padding: 12px;
                                     spacing: 12px;
                                     alignment: start;
-                                    for line in root.opening-lines: Rectangle {
-                                        background: root.drill-line-id == line.id ? #3f3f46 : #27272a;
-                                        border-radius: 8px;
-                                        padding: 12px;
-                                        height: 90px;
+                                    for course in root.opening-lines: Button {
+                                        height: 112px;
+                                        text: course.name + " | " + course.side + "\n"
+                                            + course.moves + "\n"
+                                            + course.line_count + " lines | " + course.source;
+                                        clicked => { root.select-course(course.id); }
+                                    }
+                                }
+                            }
+                        }
 
-                                        TouchArea {
-                                            clicked => {
-                                                root.select-repertoire-line(line.id);
-                                            }
+                        if (root.selected-course-id != "") : Button {
+                            height: 34px;
+                            text: "< All Courses";
+                            clicked => { root.select-course(""); }
+                        }
+
+                        if (root.selected-course-id != "") : Text {
+                            text: root.selected-course-title;
+                            color: #ffffff;
+                            font-size: 18px;
+                            font-weight: 700;
+                        }
+
+                        if (root.selected-course-id != "") : Text {
+                            text: root.selected-course-progress;
+                            color: #a78bfa;
+                            font-size: 12px;
+                        }
+
+                        if (root.selected-course-id != "") : Rectangle {
+                            background: #1a1a1e;
+                            border-radius: 8px;
+                            border-color: #27272a;
+                            border-width: 1px;
+
+                            ScrollView {
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 8px;
+                                    alignment: start;
+                                    for entry in root.course-detail: Rectangle {
+                                        height: entry.is_chapter ? 34px : 64px;
+                                        background: entry.is_chapter
+                                            ? #00000000
+                                            : #00000000;
+                                        border-radius: 6px;
+
+                                        if (!entry.is_chapter) : Button {
+                                            text: (root.drill-line-id == entry.id ? "Selected: " : "")
+                                                + entry.title + "\n" + entry.meta;
+                                            clicked => { root.select-repertoire-line(entry.id); }
                                         }
 
-                                        VerticalLayout {
-                                            alignment: space-between;
-                                            HorizontalLayout {
-                                                alignment: space-between;
-                                                Text { text: line.name; color: #ffffff; font-size: 14px; font-weight: 700; }
-                                                Text { text: "Conf: " + floor(line.confidence * 100.0) + "%"; color: #a78bfa; font-size: 12px; }
+                                        if (entry.is_chapter) : VerticalLayout {
+                                            padding: 4px;
+                                            alignment: center;
+                                            Text {
+                                                text: entry.title;
+                                                color: #a78bfa;
+                                                font-size: 13px;
+                                                font-weight: 700;
                                             }
-                                            Text { text: line.moves; color: #a1a1aa; font-size: 12px; height: 16px; overflow: elide; }
                                         }
                                     }
                                 }
@@ -1050,6 +1155,14 @@ slint::slint! {
                         spacing: 12px;
                         alignment: start;
 
+                        Text { text: "Course / Chapter"; color: #a1a1aa; font-size: 12px; }
+                        CourseTargetPicker {
+                            targets: root.course-targets;
+                            selected-id: root.builder-target-chapter-id;
+                            side: root.builder-color;
+                            choose(id) => { root.builder-target-chapter-id = id; }
+                        }
+
                         Text { text: "Line Name"; color: #a1a1aa; font-size: 12px; }
                         LineEdit {
                             height: 36px;
@@ -1130,26 +1243,34 @@ slint::slint! {
                             width: 80px; height: 32px;
                             background: root.import-side == "White" ? #6d28d9 : #27272a;
                             border-radius: 6px;
-                            TouchArea { clicked => { root.import-side = "White"; } }
+                            TouchArea { clicked => { root.import-side = "White"; root.import-target-chapter-id = ""; } }
                             Text { text: "White"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
                         }
                         Rectangle {
                             width: 80px; height: 32px;
                             background: root.import-side == "Black" ? #6d28d9 : #27272a;
                             border-radius: 6px;
-                            TouchArea { clicked => { root.import-side = "Black"; } }
+                            TouchArea { clicked => { root.import-side = "Black"; root.import-target-chapter-id = ""; } }
                             Text { text: "Black"; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
+                    Text { text: "Course / Chapter"; color: #a1a1aa; font-size: 12px; }
+                    CourseTargetPicker {
+                        width: 520px;
+                        targets: root.course-targets;
+                        selected-id: root.import-target-chapter-id;
+                        side: root.import-side;
+                        choose(id) => { root.import-target-chapter-id = id; }
+                    }
                     import-input := TextEdit {
-                        height: 260px;
+                        height: 180px;
                         placeholder-text: "Paste PGN here — variations included. Multiple games OK.";
                     }
                     HorizontalLayout {
                         spacing: 12px;
                         Button {
                             text: "Import PGN Lines";
-                            clicked => { root.import-lines(import-input.text, root.import-side); import-input.text = ""; }
+                            clicked => { root.import-lines(import-input.text, root.import-side); }
                         }
                         Button {
                             text: "Sync My Lichess Studies";
@@ -1310,6 +1431,41 @@ fn accuracy_summary_text(accuracy: Option<f32>) -> String {
         Some(value) => format!("Accuracy {:.0}% | Est. Elo {}", value, estimated_elo(value)),
         None => "Accuracy pending | Est. Elo pending".to_string(),
     }
+}
+
+fn course_progress_text(total_lines: i32, mastered_lines: i32, due_lines: i32) -> String {
+    if due_lines > 0 {
+        format!("{mastered_lines}/{total_lines} mastered - {due_lines} due")
+    } else {
+        format!("{mastered_lines}/{total_lines} mastered")
+    }
+}
+
+fn course_detail_entries(db: &SqliteStore, course_id: &str, today: &str) -> Vec<CourseDetailEntry> {
+    let mut entries = Vec::new();
+    for chapter in db.get_course_chapters(course_id).unwrap_or_default() {
+        entries.push(CourseDetailEntry {
+            id: slint::SharedString::from(""),
+            title: slint::SharedString::from(chapter.title.clone()),
+            meta: slint::SharedString::from(""),
+            is_chapter: true,
+        });
+        for line in db.get_course_lines(&chapter.id).unwrap_or_default() {
+            let status = db
+                .course_line_status(&line.id, today)
+                .unwrap_or_else(|_| "Status unavailable".to_string());
+            let move_count = db
+                .get_course_line_moves(&line.id)
+                .map_or(0, |moves| moves.len());
+            entries.push(CourseDetailEntry {
+                id: slint::SharedString::from(line.id),
+                title: slint::SharedString::from(line.title),
+                meta: slint::SharedString::from(format!("{status} | {move_count} moves")),
+                is_chapter: false,
+            });
+        }
+    }
+    entries
 }
 
 fn game_review_summary(accuracy: Option<f32>, classes: &[&str]) -> String {
@@ -1795,24 +1951,88 @@ fn main() {
                 game_entries,
             ))));
 
-            // Refresh due repertoire moves (drill queue)
-            let due = state
-                .db
-                .get_due_repertoire_moves(&today)
-                .unwrap_or_default();
-            let line_entries: Vec<OpeningLineEntry> = due
-                .iter()
-                .map(|e| OpeningLineEntry {
-                    id: slint::SharedString::from(e.id.to_string()),
-                    name: slint::SharedString::from(format!("{} ({})", e.san, e.source)),
-                    moves: slint::SharedString::from(e.uci.clone()),
-                    confidence: (e.srs_reps as f32 / 10.0).min(1.0),
-                    start_fen: slint::SharedString::from(e.parent_fen.clone()),
-                })
-                .collect();
+            // Refresh real course cards and selected course detail.
+            let courses = state.db.get_courses().unwrap_or_default();
+            let mut line_entries = Vec::new();
+            for course in &courses {
+                let Ok(progress) = state.db.course_progress(&course.id, &today) else {
+                    continue;
+                };
+                let total = progress.total_lines as i32;
+                let mastered = progress.mastered_lines as i32;
+                let due = progress.due_lines as i32;
+                line_entries.push(OpeningLineEntry {
+                    id: slint::SharedString::from(course.id.clone()),
+                    name: slint::SharedString::from(course.title.clone()),
+                    moves: slint::SharedString::from(course_progress_text(total, mastered, due)),
+                    confidence: if total == 0 {
+                        0.0
+                    } else {
+                        mastered as f32 / total as f32
+                    },
+                    start_fen: slint::SharedString::from(course.thumbnail_fen.clone()),
+                    side: slint::SharedString::from(course.side.clone()),
+                    source: slint::SharedString::from(course.source.clone()),
+                    line_count: total,
+                });
+            }
             app.set_opening_lines(slint::ModelRc::from(Rc::new(slint::VecModel::from(
                 line_entries,
             ))));
+
+            let mut course_targets = Vec::new();
+            for course in &courses {
+                if matches!(
+                    course.id.as_str(),
+                    "uncategorized-white" | "uncategorized-black"
+                ) {
+                    continue;
+                }
+                for chapter in state.db.get_course_chapters(&course.id).unwrap_or_default() {
+                    course_targets.push(CourseTargetEntry {
+                        id: slint::SharedString::from(chapter.id),
+                        label: slint::SharedString::from(format!(
+                            "{} / {}",
+                            course.title, chapter.title
+                        )),
+                        side: slint::SharedString::from(course.side.clone()),
+                    });
+                }
+            }
+            app.set_course_targets(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                course_targets,
+            ))));
+
+            let selected_course_id = app.get_selected_course_id().to_string();
+            if let Some(course) = courses
+                .iter()
+                .find(|course| course.id == selected_course_id)
+            {
+                let progress = state.db.course_progress(&course.id, &today).ok();
+                let progress_text = progress.map_or_else(
+                    || "0/0 mastered".to_string(),
+                    |progress| {
+                        course_progress_text(
+                            progress.total_lines as i32,
+                            progress.mastered_lines as i32,
+                            progress.due_lines as i32,
+                        )
+                    },
+                );
+                app.set_selected_course_title(slint::SharedString::from(course.title.clone()));
+                app.set_selected_course_progress(slint::SharedString::from(progress_text));
+                app.set_course_detail(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                    course_detail_entries(&state.db, &course.id, &today),
+                ))));
+            } else if !selected_course_id.is_empty() {
+                app.set_selected_course_id(slint::SharedString::from(""));
+                app.set_selected_course_title(slint::SharedString::from(""));
+                app.set_selected_course_progress(slint::SharedString::from(""));
+                app.set_course_detail(slint::ModelRc::from(Rc::new(slint::VecModel::from(Vec::<
+                    CourseDetailEntry,
+                >::new(
+                )))));
+            }
 
             // Refresh training logs
             let mut stmt = state.db.conn.prepare("SELECT kind, target_id, outcome, score_delta, created_at FROM training_events ORDER BY created_at DESC").unwrap();
@@ -1849,6 +2069,31 @@ fn main() {
         app.on_select_screen(move |screen| {
             let app = app_weak.upgrade().unwrap();
             app.set_active_screen(screen);
+        });
+    }
+
+    // Course catalog/detail selection.
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh = refresh_data.clone();
+        app.on_select_course(move |course_id| {
+            let mut state = state.lock().unwrap();
+            let app = app_weak.upgrade().unwrap();
+            state.drill_start_edge = None;
+            state.drill_expected.clear();
+            drop(state);
+            app.set_drill_line_id(slint::SharedString::default());
+            app.set_drill_name(slint::SharedString::default());
+            app.set_drill_instructions(slint::SharedString::from("Select a named line to drill."));
+            app.set_drill_branch_info(slint::SharedString::default());
+            app.set_drill_active(false);
+            app.set_board_selected_square(-1);
+            app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"),
+            ))));
+            app.set_selected_course_id(course_id);
+            refresh();
         });
     }
 
@@ -2026,33 +2271,36 @@ fn main() {
         });
     }
 
-    // Wire repertoire line selection for drilling
+    // Resolve a named course line to its first existing repertoire edge for drilling.
     {
         let state = state.clone();
         let app_weak = app_weak.clone();
-        app.on_select_repertoire_line(move |edge_id: slint::SharedString| {
+        app.on_select_repertoire_line(move |line_id: slint::SharedString| {
             let mut state = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
-            let id: i64 = match edge_id.parse() {
-                Ok(v) => v,
-                Err(_) => return,
+            let Ok(Some(line)) = state.db.get_course_line(&line_id) else {
+                return;
             };
-            if let Ok(Some(edge)) = state.db.get_repertoire_move(id) {
-                app.set_drill_line_id(edge_id);
-                app.set_drill_name(slint::SharedString::from(format!(
-                    "Drill: {} ({})",
-                    edge.san, edge.source
-                )));
-                app.set_drill_instructions(slint::SharedString::from(
-                    "Press 'Start Drill' to practice from this position.",
-                ));
-                app.set_drill_active(false);
-                app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
-                    fen_to_pieces(&edge.parent_fen),
-                ))));
-                app.set_board_selected_square(-1);
-                state.drill_start_edge = Some(edge);
-            }
+            let Ok(moves) = state.db.get_course_line_moves(&line_id) else {
+                return;
+            };
+            let Some((first_move_id, _, _)) = moves.first() else {
+                return;
+            };
+            let Ok(Some(edge)) = state.db.get_repertoire_move(*first_move_id) else {
+                return;
+            };
+            app.set_drill_line_id(line_id);
+            app.set_drill_name(slint::SharedString::from(format!("Drill: {}", line.title)));
+            app.set_drill_instructions(slint::SharedString::from(
+                "Press 'Start Drill' to practice from this course line's opening position.",
+            ));
+            app.set_drill_active(false);
+            app.set_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                fen_to_pieces(&edge.parent_fen),
+            ))));
+            app.set_board_selected_square(-1);
+            state.drill_start_edge = Some(edge);
         });
     }
 
@@ -2762,6 +3010,7 @@ fn main() {
             drop(st);
             let app = app_weak.upgrade().unwrap();
             app.set_builder_color(color);
+            app.set_builder_target_chapter_id(slint::SharedString::from(""));
         });
     }
 
@@ -2779,12 +3028,49 @@ fn main() {
             let start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
             let staged = st.builder_staged_uci.clone();
             let side = st.builder_color.clone();
-            match tree::import_uci_line(&mut st.db, start_fen, &staged, &side, "manual") {
-                Ok(n) => app.set_drill_instructions(slint::SharedString::from(format!(
-                    "Saved: {n} new move(s) added to your {side} repertoire."
+            let requested_chapter = app.get_builder_target_chapter_id().to_string();
+            let line_title = app.get_builder_line_name().to_string();
+            let result = if requested_chapter.is_empty() {
+                st.db
+                    .ensure_uncategorized_chapter(&side)
+                    .and_then(|chapter_id| {
+                        tree::import_uci_line_as_course_line(
+                            &mut st.db,
+                            start_fen,
+                            &staged,
+                            &side,
+                            "manual",
+                            &chapter_id,
+                            if line_title.trim().is_empty() {
+                                "Manual Line"
+                            } else {
+                                line_title.trim()
+                            },
+                        )
+                    })
+            } else {
+                tree::import_uci_line_as_course_line(
+                    &mut st.db,
+                    start_fen,
+                    &staged,
+                    &side,
+                    "manual",
+                    &requested_chapter,
+                    if line_title.trim().is_empty() {
+                        "Manual Line"
+                    } else {
+                        line_title.trim()
+                    },
+                )
+            };
+            match result {
+                Ok(_) => app.set_tree_status(slint::SharedString::from(format!(
+                    "Saved line into a {side} course chapter."
                 ))),
-                Err(e) => app
-                    .set_drill_instructions(slint::SharedString::from(format!("Save failed: {e}"))),
+                Err(e) => {
+                    app.set_tree_status(slint::SharedString::from(format!("Save failed: {e}")));
+                    return;
+                }
             }
             // Reset builder after save
             st.builder_chess = shakmaty::Chess::default();
@@ -2891,20 +3177,22 @@ fn main() {
                 app.set_import_status(slint::SharedString::from("Nothing to import."));
                 return;
             }
-            let walked = match pgn_processor::walk_pgn_variations(&pgn) {
-                Ok(w) => w,
-                Err(e) => {
-                    app.set_import_status(slint::SharedString::from(format!("Parse error: {e}")));
-                    return;
-                }
-            };
-            let total = walked.len();
+            let requested_chapter = app.get_import_target_chapter_id().to_string();
+            let side = side.to_string();
             let mut st = state.lock().unwrap();
-            match tree::import_walked(&mut st.db, &walked, &side, "pgn") {
-                Ok(n) => {
+            let chapter = if requested_chapter.is_empty() {
+                st.db.ensure_uncategorized_chapter(&side)
+            } else {
+                Ok(requested_chapter)
+            };
+            let result = chapter.and_then(|chapter_id| {
+                tree::import_pgn_as_course_lines(&mut st.db, &pgn, &side, "pgn", &chapter_id)
+            });
+            match result {
+                Ok((new_edges, named_lines)) => {
                     drop(st);
                     app.set_import_status(slint::SharedString::from(format!(
-                        "Imported {n} new move(s) ({total} parsed) into {side} repertoire."
+                        "Imported {new_edges} new move(s) and {named_lines} named line(s) into {side} courses."
                     )));
                     refresh();
                 }
@@ -2921,6 +3209,10 @@ fn main() {
         let app_weak = app_weak.clone();
         let refresh = refresh_data.clone();
         app.on_sync_studies(move |side: slint::SharedString| {
+            let requested_chapter = app_weak
+                .upgrade()
+                .map(|app| app.get_import_target_chapter_id().to_string())
+                .unwrap_or_default();
             let state = state.clone();
             let app_weak = app_weak.clone();
             let refresh = refresh.clone();
@@ -2938,16 +3230,28 @@ fn main() {
                 let client = lichess_client::LichessClient::new(&token);
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let msg = match rt.block_on(client.fetch_studies_pgn(&username)) {
-                    Ok(pgn_text) => match pgn_processor::walk_pgn_variations(&pgn_text) {
-                        Ok(walked) => {
-                            let mut st = state.lock().unwrap();
-                            match tree::import_walked(&mut st.db, &walked, &side, "study") {
-                                Ok(n) => format!("Studies: {n} new move(s) imported."),
-                                Err(e) => format!("Study import failed: {e}"),
-                            }
+                    Ok(pgn_text) => {
+                        let mut st = state.lock().unwrap();
+                        let chapter = if requested_chapter.is_empty() {
+                            st.db.ensure_uncategorized_chapter(&side)
+                        } else {
+                            Ok(requested_chapter.clone())
+                        };
+                        match chapter.and_then(|chapter_id| {
+                            tree::import_pgn_as_course_lines(
+                                &mut st.db,
+                                &pgn_text,
+                                &side,
+                                "study",
+                                &chapter_id,
+                            )
+                        }) {
+                            Ok((new_edges, named_lines)) => format!(
+                                "Studies: {new_edges} new move(s), {named_lines} named line(s)."
+                            ),
+                            Err(e) => format!("Study import failed: {e}"),
                         }
-                        Err(e) => format!("Study parse failed: {e}"),
-                    },
+                    }
                     Err(e) => format!("Studies fetch failed: {e}"),
                 };
                 let aw = app_weak.clone();
@@ -3766,9 +4070,9 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
 #[cfg(test)]
 mod tests {
     use super::{
-        accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, fen_to_pieces,
-        game_review_summary, puzzle_progress_text, review_stat_entries, sk_fen, solution_to_san,
-        starter_puzzles, updated_puzzle_rating,
+        accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, course_progress_text,
+        fen_to_pieces, game_review_summary, puzzle_progress_text, review_stat_entries, sk_fen,
+        solution_to_san, starter_puzzles, updated_puzzle_rating,
     };
     use shakmaty::uci::Uci;
     use shakmaty::{CastlingMode, Chess, Position};
@@ -3898,6 +4202,12 @@ mod tests {
             accuracy_summary_text(None),
             "Accuracy pending | Est. Elo pending"
         );
+    }
+
+    #[test]
+    fn course_progress_text_reports_mastered_and_due_lines() {
+        assert_eq!(course_progress_text(3, 2, 1), "2/3 mastered - 1 due");
+        assert_eq!(course_progress_text(3, 3, 0), "3/3 mastered");
     }
 
     #[test]
