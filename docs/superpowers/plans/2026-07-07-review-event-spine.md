@@ -14,12 +14,19 @@
 
 This can start after course metadata exists, but before FSRS or tactical motif work. Do not implement FSRS in this plan.
 
+## Implementation Notes
+
+- Implemented 2026-07-11 following this plan task-by-task.
+- One divergence from the Task 2 sketch: review-event ids append a process-local atomic sequence to the nanosecond suffix, so grading the same edge twice inside one clock tick cannot collide on the `review_events` primary key.
+- Tests are stronger than the sketches: the CRUD test round-trips the optional course/line/move context fields, and the grading test asserts the SM-2 schedule matches plain `grade_edge` plus a second event from a `bot_deviation` source.
+- The code samples below remain the original TDD sketches; the merged implementation and tests are authoritative where they differ.
+
 ## Task 1: Review Event Schema And CRUD
 
 **Files:**
 - Modify: `db_manager/src/lib.rs`
 
-- [ ] **Step 1: Add failing CRUD test**
+- [x] **Step 1: Add failing CRUD test**
 
 Add to `db_manager/src/lib.rs` tests:
 
@@ -49,13 +56,13 @@ fn review_events_record_target_rating_and_source() {
 }
 ```
 
-- [ ] **Step 2: Run failing test**
+- [x] **Step 2: Run failing test**
 
 Run: `cargo test -p db_manager review_events_record_target_rating_and_source`
 
 Expected: compile failure because `ReviewEventRecord` and helpers do not exist.
 
-- [ ] **Step 3: Add schema**
+- [x] **Step 3: Add schema**
 
 Append to `SQLITE_SCHEMA`:
 
@@ -76,7 +83,7 @@ CREATE TABLE IF NOT EXISTS review_events (
 "#,
 ```
 
-- [ ] **Step 4: Add record and helpers**
+- [x] **Step 4: Add record and helpers**
 
 Add near other records:
 
@@ -150,13 +157,13 @@ pub fn get_review_events_for_target(
 }
 ```
 
-- [ ] **Step 5: Run test**
+- [x] **Step 5: Run test**
 
 Run: `cargo test -p db_manager review_events_record_target_rating_and_source`
 
 Expected: pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add db_manager/src/lib.rs
@@ -169,7 +176,7 @@ git commit -m "feat(db): add normalized review events"
 - Modify: `app/src/tree.rs`
 - Test: `app/src/tree.rs`
 
-- [ ] **Step 1: Add failing grading-event test**
+- [x] **Step 1: Add failing grading-event test**
 
 Add to `app/src/tree.rs` tests:
 
@@ -191,13 +198,13 @@ fn grade_edge_records_review_event() {
 }
 ```
 
-- [ ] **Step 2: Run failing test**
+- [x] **Step 2: Run failing test**
 
 Run: `cargo test -p app grade_edge_records_review_event`
 
 Expected: compile failure because `grade_edge_with_event` does not exist.
 
-- [ ] **Step 3: Add wrapper without breaking existing callers**
+- [x] **Step 3: Add wrapper without breaking existing callers**
 
 Add to `app/src/tree.rs`:
 
@@ -231,13 +238,13 @@ pub fn grade_edge_with_event(
 }
 ```
 
-- [ ] **Step 4: Run test**
+- [x] **Step 4: Run test**
 
 Run: `cargo test -p app grade_edge_records_review_event`
 
 Expected: pass.
 
-- [ ] **Step 5: Replace two grading call sites**
+- [x] **Step 5: Replace two grading call sites**
 
 In `app/src/main.rs`, replace drill and bot-deviation calls to:
 
@@ -249,13 +256,13 @@ tree::grade_edge_with_event(&mut st.db, e, 1, today_days, "bot_deviation")
 
 Keep existing `training_events` inserts for now so the current dashboard/history does not lose data.
 
-- [ ] **Step 6: Run app tests**
+- [x] **Step 6: Run app tests**
 
 Run: `cargo test -p app`
 
 Expected: pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add db_manager/src/lib.rs app/src/tree.rs app/src/main.rs
