@@ -95,6 +95,9 @@ CREATE TABLE IF NOT EXISTS repertoire_moves (
     srs_ease REAL DEFAULT 2.5,
     srs_reps INTEGER DEFAULT 0,
     srs_due_date TEXT DEFAULT '',
+    fsrs_stability REAL,
+    fsrs_difficulty REAL,
+    fsrs_last_review TEXT,
     UNIQUE (parent_id, uci)
 );
 "#,
@@ -252,6 +255,9 @@ pub struct RepertoireMoveRecord {
     pub srs_ease: f32,
     pub srs_reps: u32,
     pub srs_due_date: String,
+    pub fsrs_stability: Option<f64>,
+    pub fsrs_difficulty: Option<f64>,
+    pub fsrs_last_review: Option<String>,
     pub parent_fen: String,
 }
 
@@ -294,6 +300,11 @@ pub struct CourseProgress {
     pub mastered_lines: u32,
     pub due_lines: u32,
     pub weak_lines: u32,
+}
+
+/// SM-2 ease (~1.3 hard .. 3.0 easy) -> FSRS difficulty (10 hard .. 1 easy), monotone, clamped.
+pub fn ease_to_difficulty(ease: f32) -> f64 {
+    (10.0 - (ease as f64 - 1.3) * (9.0 / 1.7)).clamp(1.0, 10.0)
 }
 
 /// One normalized learning event: any reviewable target (repertoire move,
@@ -787,14 +798,17 @@ impl SqliteStore {
             srs_ease: row.get::<_, f64>(9)? as f32,
             srs_reps: row.get::<_, i64>(10)? as u32,
             srs_due_date: row.get(11)?,
-            parent_fen: row.get(12)?,
+            fsrs_stability: row.get(12)?,
+            fsrs_difficulty: row.get(13)?,
+            fsrs_last_review: row.get(14)?,
+            parent_fen: row.get(15)?,
         })
     }
 
     const REP_MOVE_COLS: &'static str =
         "m.id, m.parent_id, m.child_id, m.uci, m.san, m.is_my_move, m.source, m.comment, \
          COALESCE(m.srs_interval, 1.0), COALESCE(m.srs_ease, 2.5), \
-         COALESCE(m.srs_reps, 0), COALESCE(m.srs_due_date, ''), n.fen";
+         COALESCE(m.srs_reps, 0), COALESCE(m.srs_due_date, ''), m.fsrs_stability, m.fsrs_difficulty, m.fsrs_last_review, n.fen";
 
     pub fn ensure_repertoire_node(&mut self, fen: &str, side: &str) -> Result<i64, String> {
         let norm = normalize_fen(fen);
@@ -910,6 +924,48 @@ impl SqliteStore {
                  SET srs_interval = ?1, srs_ease = ?2, srs_reps = ?3, srs_due_date = ?4
                  WHERE id = ?5",
                 rusqlite::params![interval, ease, reps, due_date, move_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_repertoire_move_fsrs(
+        &mut self,
+        move_id: i64,
+        stability: f64,
+        difficulty: f64,
+        last_review: &str,
+        reps: u32,
+        due_date: &str,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE repertoire_moves
+                 SET fsrs_stability = ?1, fsrs_difficulty = ?2, fsrs_last_review = ?3,
+                     srs_reps = ?4, srs_due_date = ?5
+                 WHERE id = ?6",
+                rusqlite::params![stability, difficulty, last_review, reps, due_date, move_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Seed FSRS state for edges that have SM-2 history but no FSRS state yet.
+    /// Conservative: stability = old interval, due dates untouched, last review
+    /// backdated by the interval. Idempotent (WHERE fsrs_stability IS NULL).
+    /// The SQL difficulty formula mirrors [`ease_to_difficulty`].
+    fn migrate_sm2_to_fsrs(&mut self) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE repertoire_moves SET
+                    fsrs_stability = MAX(srs_interval, 0.1),
+                    fsrs_difficulty = MIN(MAX(10.0 - (srs_ease - 1.3) * (9.0 / 1.7), 1.0), 10.0),
+                    fsrs_last_review = date(
+                        CASE WHEN srs_due_date <> '' THEN srs_due_date ELSE date('now') END,
+                        '-' || CAST(ROUND(MAX(srs_interval, 1.0)) AS INTEGER) || ' days')
+                 WHERE is_my_move = 1 AND fsrs_stability IS NULL
+                   AND (srs_reps > 0 OR srs_due_date <> '')",
+                [],
             )
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -1275,8 +1331,9 @@ impl SqliteStore {
     }
 
     /// A move is weak when its 3 most recent review events contain at least
-    /// 2 failures (rating <= 2) or any bot-play deviation. Failures age out of
-    /// the window as newer successful reviews land.
+    /// 2 failures (rating 1, Again on the FSRS scale — Hard is a success) or
+    /// any bot-play deviation. Failures age out of the window as newer
+    /// successful reviews land.
     fn move_is_weak(&self, move_id: i64) -> Result<bool, String> {
         let mut stmt = self
             .conn
@@ -1297,7 +1354,7 @@ impl SqliteStore {
             if source == "bot_deviation" {
                 return Ok(true);
             }
-            failures += i32::from(rating <= 2);
+            failures += i32::from(rating <= 1);
         }
         Ok(failures >= 2)
     }
@@ -1507,6 +1564,20 @@ impl TrainingStore for SqliteStore {
         for stmt in schema_bootstrap_statements() {
             self.conn.execute(stmt, []).map_err(|e| e.to_string())?;
         }
+        // Databases created before the FSRS migration lack these columns;
+        // CREATE TABLE IF NOT EXISTS cannot add them.
+        for stmt in [
+            "ALTER TABLE repertoire_moves ADD COLUMN fsrs_stability REAL",
+            "ALTER TABLE repertoire_moves ADD COLUMN fsrs_difficulty REAL",
+            "ALTER TABLE repertoire_moves ADD COLUMN fsrs_last_review TEXT",
+        ] {
+            if let Err(e) = self.conn.execute(stmt, []) {
+                if !e.to_string().contains("duplicate column name") {
+                    return Err(e.to_string());
+                }
+            }
+        }
+        self.migrate_sm2_to_fsrs()?;
         Ok(())
     }
 
@@ -2043,6 +2114,18 @@ mod tests {
             store.course_line_status("line2", "2026-07-10").unwrap(),
             "Undiscovered"
         );
+
+        // Hard (rating 2) is a success on the FSRS scale: once discovered and
+        // with the old failures pushed out of the window, the line is not Weak.
+        store
+            .update_repertoire_move_srs(move2, 1.0, 2.5, 1, "2026-07-20")
+            .unwrap();
+        add_review_event(&mut store, "f3", move2, 2, "drill", "2026-07-14");
+        add_review_event(&mut store, "f4", move2, 2, "drill", "2026-07-15");
+        assert_eq!(
+            store.course_line_status("line2", "2026-07-10").unwrap(),
+            "Learned"
+        );
     }
 
     #[test]
@@ -2381,5 +2464,63 @@ mod tests {
         assert_eq!(puzzle_events.len(), 1);
         assert_eq!(puzzle_events[0].course_id, None);
         assert_eq!(puzzle_events[0].move_id, None);
+    }
+
+    #[test]
+    fn fsrs_columns_round_trip_and_migration_preserves_due_queue() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+        let root = store
+            .ensure_repertoire_node("a w - - 0 1", "White")
+            .unwrap();
+        let child = store
+            .ensure_repertoire_node("b b - - 0 1", "White")
+            .unwrap();
+        let (move_id, _) = store
+            .insert_repertoire_move(root, child, "e2e4", "e4", true, "manual")
+            .unwrap();
+
+        // New edge: no FSRS state yet.
+        let edge = store.get_repertoire_move(move_id).unwrap().unwrap();
+        assert_eq!(edge.fsrs_stability, None);
+
+        // Simulate SM-2 history (interval 6, ease 2.5, 2 reps, due 2026-07-15),
+        // then re-run bootstrap: the migration must seed FSRS state without
+        // touching the due date, and be idempotent.
+        store
+            .update_repertoire_move_srs(move_id, 6.0, 2.5, 2, "2026-07-15")
+            .unwrap();
+        store.bootstrap().unwrap();
+        let migrated = store.get_repertoire_move(move_id).unwrap().unwrap();
+        assert_eq!(migrated.srs_due_date, "2026-07-15");
+        assert_eq!(migrated.fsrs_stability, Some(6.0));
+        let difficulty = migrated.fsrs_difficulty.unwrap();
+        assert!((1.0..=10.0).contains(&difficulty));
+        assert!((difficulty - ease_to_difficulty(2.5)).abs() < 1e-6);
+        // last_review backdated by the interval: 2026-07-15 - 6 days.
+        assert_eq!(migrated.fsrs_last_review.as_deref(), Some("2026-07-09"));
+
+        let before = migrated.clone();
+        store.bootstrap().unwrap();
+        assert_eq!(store.get_repertoire_move(move_id).unwrap().unwrap(), before);
+
+        // Direct FSRS write updates both FSRS state and shared columns.
+        store
+            .update_repertoire_move_fsrs(move_id, 9.5, 4.2, "2026-07-16", 3, "2026-07-26")
+            .unwrap();
+        let updated = store.get_repertoire_move(move_id).unwrap().unwrap();
+        assert_eq!(updated.fsrs_stability, Some(9.5));
+        assert_eq!(updated.fsrs_last_review.as_deref(), Some("2026-07-16"));
+        assert_eq!(updated.srs_reps, 3);
+        assert_eq!(updated.srs_due_date, "2026-07-26");
+    }
+
+    #[test]
+    fn ease_to_difficulty_is_monotone_and_clamped() {
+        assert!((ease_to_difficulty(1.3) - 10.0).abs() < 1e-6);
+        assert!((ease_to_difficulty(3.0) - 1.0).abs() < 1e-6);
+        assert!(ease_to_difficulty(2.0) > ease_to_difficulty(2.5));
+        assert_eq!(ease_to_difficulty(0.5), 10.0); // clamped low ease
+        assert_eq!(ease_to_difficulty(9.9), 1.0); // clamped high ease
     }
 }
