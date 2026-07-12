@@ -101,6 +101,7 @@ fn validate_course_chapter(db: &SqliteStore, chapter_id: &str, side: &str) -> Re
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // one flat arg list beats a one-off params struct for this internal helper
 fn insert_uci_course_line(
     db: &mut SqliteStore,
     start_fen: &str,
@@ -316,7 +317,8 @@ pub fn local_now_str() -> String {
 pub fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let mut year = 1970u64;
     loop {
-        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let leap =
+            year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
         let days_in_year = if leap { 366 } else { 365 };
         if days < days_in_year {
             break;
@@ -324,7 +326,7 @@ pub fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
         days -= days_in_year;
         year += 1;
     }
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
     let month_days: [u64; 12] = [
         31,
         if leap { 29 } else { 28 },

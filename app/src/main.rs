@@ -552,7 +552,6 @@ slint::slint! {
             // Main Area
             Rectangle {
                 background: #121214;
-                padding: 24px;
 
                 // 1. Dashboard Screen
                 if (root.active-screen == "dashboard") : VerticalLayout {
@@ -564,7 +563,6 @@ slint::slint! {
                         height: 160px;
                         background: @linear-gradient(135deg, #6d28d9 0%, #4f46e5 100%);
                         border-radius: 12px;
-                        padding: 20px;
 
                         VerticalLayout {
                             alignment: space-between;
@@ -621,7 +619,6 @@ slint::slint! {
                             border-radius: 8px;
                             border-color: #27272a;
                             border-width: 1px;
-                            padding: 16px;
                             VerticalLayout {
                                 alignment: center;
                                 Text { text: "Unreviewed Games"; color: #a1a1aa; font-size: 12px; }
@@ -634,7 +631,6 @@ slint::slint! {
                             border-radius: 8px;
                             border-color: #27272a;
                             border-width: 1px;
-                            padding: 16px;
                             VerticalLayout {
                                 alignment: center;
                                 Text { text: "Blunder Hotspots"; color: #a1a1aa; font-size: 12px; }
@@ -647,7 +643,6 @@ slint::slint! {
                             border-radius: 8px;
                             border-color: #27272a;
                             border-width: 1px;
-                            padding: 16px;
                             VerticalLayout {
                                 alignment: center;
                                 Text { text: "Due Openings"; color: #a1a1aa; font-size: 12px; }
@@ -660,7 +655,6 @@ slint::slint! {
                             border-radius: 8px;
                             border-color: #27272a;
                             border-width: 1px;
-                            padding: 16px;
                             VerticalLayout {
                                 alignment: center;
                                 Text { text: "Training Rating"; color: #a1a1aa; font-size: 12px; }
@@ -694,7 +688,6 @@ slint::slint! {
                             border-color: #27272a;
                             border-width: 1px;
                             height: 200px;
-                            padding: 12px;
 
                             ScrollView {
                                 VerticalLayout {
@@ -704,7 +697,6 @@ slint::slint! {
                                         height: 45px;
                                         background: #27272a;
                                         border-radius: 6px;
-                                        padding: 8px;
                                         HorizontalLayout {
                                             alignment: space-between;
                                             VerticalLayout {
@@ -848,7 +840,6 @@ slint::slint! {
                         Rectangle {
                             background: #1a1a1e;
                             border-radius: 8px;
-                            padding: 16px;
                             // Bounded to match ChessBoard's own soft cap so this
                             // column can't claim unbounded width on an ultrawide
                             // window (and, in turn, so the outer HorizontalLayout
@@ -898,7 +889,6 @@ slint::slint! {
                             border-radius: 8px;
                             border-color: #27272a;
                             border-width: 1px;
-                            padding: 16px;
                             height: 180px;
 
                             VerticalLayout {
@@ -930,7 +920,6 @@ slint::slint! {
                             border-radius: 8px;
                             border-color: #27272a;
                             border-width: 1px;
-                            padding: 12px;
 
                             ScrollView {
                                 VerticalLayout {
@@ -939,7 +928,6 @@ slint::slint! {
                                     for game in root.games: Rectangle {
                                         background: root.selected-game-id == game.id ? #3f3f46 : #27272a;
                                         border-radius: 8px;
-                                        padding: 12px;
                                         height: 85px;
 
                                         TouchArea {
@@ -1002,7 +990,6 @@ slint::slint! {
                             Rectangle {
                                 background: #1a1a1e;
                                 border-radius: 8px;
-                                padding: 12px;
                                 // Bounded to match ChessBoard's own soft cap so this
                                 // column can't claim unbounded width on an ultrawide
                                 // window (and, in turn, so the outer HorizontalLayout
@@ -1038,7 +1025,6 @@ slint::slint! {
                                 border-radius: 8px;
                                 border-color: #27272a;
                                 border-width: 1px;
-                                padding: 8px;
 
                                 ScrollView {
                                     VerticalLayout {
@@ -1048,7 +1034,6 @@ slint::slint! {
                                             background: root.selected-move-index == index ? #3f3f46 : #27272a;
                                             border-radius: 6px;
                                             height: 40px;
-                                            padding: 8px;
 
                                             TouchArea {
                                                 clicked => {
@@ -1069,7 +1054,6 @@ slint::slint! {
                                                     background: root.selected-game-classes[index] == "Blunder" ? #f43f5e :
                                                                 root.selected-game-classes[index] == "Mistake" ? #f59e0b : #eab308;
                                                     border-radius: 4px;
-                                                    padding: 4px;
                                                     height: 20px;
                                                     HorizontalLayout {
                                                         Text {
@@ -1475,6 +1459,7 @@ fn course_detail_entries(db: &SqliteStore, course_id: &str, today: &str) -> Vec<
     entries
 }
 
+#[cfg(test)]
 fn game_review_summary(accuracy: Option<f32>, classes: &[&str]) -> String {
     let count = |label: &str| classes.iter().filter(|&&class| class == label).count();
     format!(
@@ -1673,7 +1658,7 @@ fn lichess_puzzle_to_record(
 /// "Move X of Y" counting only the solver's moves (even indices of the
 /// solution line); `index` is the next expected solution index.
 fn puzzle_progress_text(index: usize, total: usize) -> String {
-    format!("Move {} of {}", index / 2 + 1, (total + 1) / 2)
+    format!("Move {} of {}", index / 2 + 1, total.div_ceil(2))
 }
 
 /// `get_puzzle_rating` reads the latest kind='puzzle' `score_delta` as the
@@ -1927,7 +1912,7 @@ fn main() {
             };
 
             // Weakness profile
-            let all_positions: Vec<(u32, Option<i32>, Option<String>, Option<String>)> = {
+            let all_positions: Vec<weakness::PositionSummary> = {
                 let mut stmt = state
                     .db
                     .conn
@@ -2078,10 +2063,8 @@ fn main() {
                 })
                 .unwrap();
             let mut log_list = Vec::new();
-            for log in logs {
-                if let Ok(l) = log {
-                    log_list.push(l);
-                }
+            for l in logs.flatten() {
+                log_list.push(l);
             }
             app.set_history(slint::ModelRc::from(Rc::new(slint::VecModel::from(
                 log_list,
@@ -2286,7 +2269,7 @@ fn main() {
                     .row_data(idx as usize)
                     .unwrap_or_default();
 
-                if class != "" {
+                if !class.is_empty() {
                     app.set_selected_move_eval(slint::SharedString::from(format!(
                         "{} (Lost {} cp)",
                         class, loss
@@ -3024,25 +3007,22 @@ fn main() {
                         return;
                     }
                 };
-                match uci_move.to_move(&st.builder_chess) {
-                    Ok(m) => {
-                        st.builder_chess.play_unchecked(&m);
-                        st.builder_staged_uci.push(uci.clone());
-                        let new_fen = shakmaty::fen::Fen::from_position(
-                            st.builder_chess.clone(),
-                            EnPassantMode::Always,
-                        )
-                        .to_string();
-                        let pieces = fen_to_pieces(&new_fen);
-                        app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(
-                            slint::VecModel::from(pieces),
-                        )));
-                        app.set_builder_fen(slint::SharedString::from(new_fen));
-                        app.set_builder_moves(slint::SharedString::from(
-                            st.builder_staged_uci.join(" "),
-                        ));
-                    }
-                    Err(_) => {}
+                if let Ok(m) = uci_move.to_move(&st.builder_chess) {
+                    st.builder_chess.play_unchecked(&m);
+                    st.builder_staged_uci.push(uci.clone());
+                    let new_fen = shakmaty::fen::Fen::from_position(
+                        st.builder_chess.clone(),
+                        EnPassantMode::Always,
+                    )
+                    .to_string();
+                    let pieces = fen_to_pieces(&new_fen);
+                    app.set_builder_board_pieces(slint::ModelRc::from(Rc::new(
+                        slint::VecModel::from(pieces),
+                    )));
+                    app.set_builder_fen(slint::SharedString::from(new_fen));
+                    app.set_builder_moves(slint::SharedString::from(
+                        st.builder_staged_uci.join(" "),
+                    ));
                 }
                 st.builder_selected_sq = None;
                 app.set_builder_selected_square(-1);

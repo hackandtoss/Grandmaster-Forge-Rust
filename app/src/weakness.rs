@@ -8,10 +8,12 @@ pub struct WeaknessReport {
     pub top_training_priority: String,
 }
 
+/// One analyzed position: (ply, centipawn_loss, mistake_class, eco).
+pub type PositionSummary = (u32, Option<i32>, Option<String>, Option<String>);
+
 /// Build a weakness report from aggregated position data.
-/// `positions`: (ply, centipawn_loss, mistake_class, eco)
 pub fn build_weakness_report(
-    positions: &[(u32, Option<i32>, Option<String>, Option<String>)],
+    positions: &[PositionSummary],
     endgame_accuracy: f32,
 ) -> WeaknessReport {
     let mut blunder_plies: Vec<u32> = positions
