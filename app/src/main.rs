@@ -1671,6 +1671,27 @@ fn updated_puzzle_rating(current: i32, solved: bool) -> i32 {
     }
 }
 
+/// Normalized review event for one puzzle attempt: rating 5 on pass, 1 on
+/// fail (SM-2 grade scale, same as drill grading), source `puzzle_trainer`.
+fn puzzle_review_event(
+    puzzle_id: &str,
+    solved: bool,
+    created_at: &str,
+) -> db_manager::ReviewEventRecord {
+    db_manager::ReviewEventRecord {
+        id: format!("puzzle-{}-{}", puzzle_id, uuid_now()),
+        user_id: "default_user".to_string(),
+        target_type: "puzzle".to_string(),
+        target_id: puzzle_id.to_string(),
+        rating: if solved { 5 } else { 1 },
+        source: "puzzle_trainer".to_string(),
+        course_id: None,
+        line_id: None,
+        move_id: None,
+        created_at: created_at.to_string(),
+    }
+}
+
 /// Record a pass/fail training event for the current puzzle and fold the
 /// result into the puzzle rating shown on the dashboard.
 fn record_puzzle_event(state: &mut AppState, solved: bool) {
@@ -1688,6 +1709,15 @@ fn record_puzzle_event(state: &mut AppState, solved: bool) {
         created_at: tree::local_now_str(),
     };
     let _ = state.db.insert_training_event(&event);
+    // Write through to the normalized spine as well; the training_events row
+    // above stays because get_puzzle_rating still reads its score_delta.
+    let _ = state
+        .db
+        .insert_review_event(&puzzle_review_event(
+            &puzzle.id,
+            solved,
+            &tree::local_now_str(),
+        ));
 }
 
 /// Replay a puzzle's UCI solution from its FEN and render it as SAN.
@@ -4173,6 +4203,7 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
 mod tests {
     use super::{
         accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, course_progress_text,
+        puzzle_review_event,
         fen_to_pieces, game_review_summary, lichess_puzzle_to_record, puzzle_progress_text,
         review_stat_entries, sk_fen, solution_to_san, starter_puzzles, updated_puzzle_rating,
     };
@@ -4304,6 +4335,24 @@ mod tests {
             accuracy_summary_text(None),
             "Accuracy pending | Est. Elo pending"
         );
+    }
+
+    #[test]
+    fn puzzle_review_event_follows_review_event_conventions() {
+        let passed = puzzle_review_event("lichess_abc12", true, "2026-07-11");
+        assert_eq!(passed.target_type, "puzzle");
+        assert_eq!(passed.target_id, "lichess_abc12");
+        assert_eq!(passed.rating, 5);
+        assert_eq!(passed.source, "puzzle_trainer");
+        assert_eq!(passed.user_id, "default_user");
+        assert_eq!(passed.created_at, "2026-07-11");
+        assert_eq!(passed.course_id, None);
+        assert_eq!(passed.line_id, None);
+        assert_eq!(passed.move_id, None);
+
+        let failed = puzzle_review_event("lichess_abc12", false, "2026-07-11");
+        assert_eq!(failed.rating, 1);
+        assert_ne!(passed.id, failed.id, "event ids must be unique");
     }
 
     #[test]
