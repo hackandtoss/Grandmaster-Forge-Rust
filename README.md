@@ -1,6 +1,6 @@
 # Grandmaster Forge
 
-A Rust desktop chess training platform combining ideas from Lichess, Chess.com, AIMchess, ChessReps, and ChessIgma — course-based opening repertoire builder, per-move-edge spaced-repetition drills, play vs a book-driven bot, game review with engine analysis, weakness profiling, puzzles, and Lichess + Chess.com sync.
+A Rust desktop chess training platform combining ideas from Lichess, Chess.com, AIMchess, ChessReps, and ChessIgma — course-based opening repertoire builder, per-move-edge FSRS spaced-repetition drills, play vs a book-driven bot, game review with engine analysis, weakness profiling, puzzles, and Lichess + Chess.com sync.
 
 ---
 
@@ -15,7 +15,7 @@ Core rules:
 - Keep UI work responsive; engine analysis and sync work stay off the UI path.
 - Prefer the current SQLite/rusqlite store until a measured bottleneck justifies a database migration.
 
-Near-term direction: add a tactical scrutinizer on top of the existing game-review and mistake-tree pipeline, then migrate the learning scheduler from SM-2 to FSRS once the review/event model is stable.
+Near-term direction: add a tactical scrutinizer on top of the existing game-review and mistake-tree pipeline. The learning scheduler migrated from SM-2 to FSRS in 2026-07; a future step is fitting FSRS parameters to the user's own `review_events` history.
 
 ---
 
@@ -38,11 +38,11 @@ Near-term direction: add a tactical scrutinizer on top of the existing game-revi
 - Browse the Lichess opening explorer from any board position
 - "Adopt" a master/community move to graft it straight into your repertoire tree as a new edge
 
-### SM-2 Spaced Repetition Drills
-- SM-2 state lives on each **move edge** of the repertoire tree (one card per position→move), not per whole line: interval, ease factor, repetition count, due date
-- Pass → grade 5: interval grows per SM-2, confidence ticks up
-- Fail → grade 1: interval resets to 1 day, ease decays — a single wrong branch schedules just that edge for review, not the entire line
-- Daily queue shows only edges due today, sorted by due date
+### FSRS Spaced Repetition Drills
+- FSRS memory state (stability, difficulty, last review) lives on each **move edge** of the repertoire tree (one card per position→move), not per whole line, scheduled by `rs-fsrs` (long-term scheduler, deterministic)
+- Ratings are automatic — no self-grading buttons: correct → Good, correct but hesitant (>15s) → Hard, wrong move → Again
+- Again collapses stability so the edge returns soon and resets the rep count — a single wrong branch reschedules just that edge, not the entire line
+- Daily queue shows only edges due today, sorted by due date; SM-2 state from older databases is converted at startup without changing any due date
 
 ### Color-Aware Drill Engine
 - Black repertoire lines: engine auto-plays White's first move before waiting for your reply
@@ -56,8 +56,8 @@ Near-term direction: add a tactical scrutinizer on top of the existing game-revi
 ### Play vs Book Bot
 - Play a full game against a bot that follows *your* prepared repertoire while both sides are in book, branching uniformly at random among your stored opponent replies
 - When the position leaves your prep, a Stockfish `PlaySession` takes over at your chosen Elo (clamped to a 1320 floor) — the UI flips between "In book (your prep)" and "Out of book (Stockfish)"
-- Deviating from a known position grades every expected my-move edge as a lapse (SM-2 grade 1) and records the deviation; play continues so you can finish the game
-- Resign or reach game-over to get a summary (plies in book, where you left book, deviations due for review — scheduled by SM-2); "Review This Game" hands the game to Game Review for full engine analysis
+- Deviating from a known position grades every expected my-move edge as a lapse (FSRS Again) and records the deviation; play continues so you can finish the game
+- Resign or reach game-over to get a summary (plies in book, where you left book, deviations due for review — scheduled by FSRS); "Review This Game" hands the game to Game Review for full engine analysis
 
 ### Game Review
 - Import PGN; Stockfish analyses every position in a background thread
@@ -120,7 +120,7 @@ Grandmaster-Forge-Rust/
 │   └── src/
 │       ├── main.rs       # slint! macro, AppState, all on_* callback wiring
 │       ├── tree.rs       # Repertoire position graph: position_key, edge insert/walk, course routing, grade_edge
-│       ├── srs.rs        # SM-2 algorithm (review(), SrsCard)
+│       ├── fsrs.rs       # FSRS adapter (rs-fsrs, automatic drill ratings)
 │       ├── accuracy.rs   # Chess.com accuracy formula, phase breakdown
 │       ├── weakness.rs   # WeaknessReport builder
 │       └── scraper.rs    # Async BFS opening tree (no Mutex across .await)
@@ -143,7 +143,7 @@ Grandmaster-Forge-Rust/
 | Environment | dotenvy 0.15 |
 
 Planned learning upgrades:
-- FSRS replaces SM-2 as the scheduling algorithm when the app has enough review outcomes to tune intervals usefully.
+- Fit FSRS parameters to the user's own `review_events` history (offline optimizer) once enough outcomes accumulate; default published parameters are used today.
 - Zobrist hashes may be added as a cached/indexed position key if normalized-FEN lookups become a measured hot path; the semantic model remains "same position, same node."
 - `linfa` may be added for weakness clustering after tactical labels are being collected consistently.
 
@@ -170,7 +170,7 @@ Planned learning upgrades:
 | `games` | Imported/synced games with accuracy columns |
 | `positions` | Per-ply FEN, centipawn loss, mistake class |
 | `repertoire_nodes` | Repertoire graph positions: normalized FEN + side (White/Black) |
-| `repertoire_moves` | Move edges between nodes, each carrying its own SM-2 state (interval/ease/reps/due) and is-my-move flag |
+| `repertoire_moves` | Move edges between nodes, each carrying shared due/reps plus FSRS memory state (stability/difficulty/last review) and is-my-move flag |
 | `courses` | User-visible opening course metadata, side, source, tags, and thumbnail FEN |
 | `course_chapters` | Ordered chapter metadata within a course |
 | `course_lines` | Named course lines rooted at existing repertoire graph nodes |
@@ -221,5 +221,5 @@ cargo run --release -p app
 
 ```bash
 cargo test --workspace
-# 84 tests across db_manager (incl. course metadata/status, review events, Weak lines), app (srs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
+# 85 tests across db_manager (incl. course metadata/status, review events, Weak lines, FSRS migration), app (fsrs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
 ```

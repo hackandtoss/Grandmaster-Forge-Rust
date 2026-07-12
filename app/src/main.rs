@@ -1,6 +1,6 @@
 mod accuracy;
+mod fsrs;
 mod scraper;
-mod srs;
 mod tree;
 mod weakness;
 
@@ -1868,6 +1868,7 @@ struct AppState {
     drill_chess: Chess,                                    // current drill position (kept)
     drill_expected: Vec<db_manager::RepertoireMoveRecord>, // my-move edges at current node
     drill_start_edge: Option<db_manager::RepertoireMoveRecord>,
+    drill_prompt_at: Option<std::time::Instant>, // when the current your-move prompt appeared
     // Current board FEN for explorer
     current_fen: Option<String>,
     // Repertoire builder state
@@ -1925,6 +1926,7 @@ fn main() {
         drill_chess: Chess::default(),
         drill_expected: Vec::new(),
         drill_start_edge: None,
+        drill_prompt_at: None,
         current_fen: None,
         builder_chess: Chess::default(),
         builder_staged_uci: Vec::new(),
@@ -2438,7 +2440,18 @@ fn main() {
                 .cloned();
 
             if let Some(edge) = matched {
-                let _ = tree::grade_edge_with_event(&mut state.db, &edge, 5, today_days, "drill");
+                let elapsed = state
+                    .drill_prompt_at
+                    .take()
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0);
+                let _ = tree::grade_edge_with_event(
+                    &mut state.db,
+                    &edge,
+                    fsrs::drill_rating(true, elapsed),
+                    today_days,
+                    "drill",
+                );
                 let event = TrainingEventRecord {
                     id: format!("evt_{}", uuid_now()),
                     user_id: "default_user".to_string(),
@@ -2470,8 +2483,13 @@ fn main() {
             } else {
                 // Wrong move: fail every expected edge at this node (they were all "the answer")
                 for edge in state.drill_expected.clone() {
-                    let _ =
-                        tree::grade_edge_with_event(&mut state.db, &edge, 1, today_days, "drill");
+                    let _ = tree::grade_edge_with_event(
+                        &mut state.db,
+                        &edge,
+                        fsrs::Rating::Again,
+                        today_days,
+                        "drill",
+                    );
                 }
                 let event = TrainingEventRecord {
                     id: format!("evt_{}", uuid_now()),
@@ -3571,7 +3589,7 @@ fn main() {
                         let _ = tree::grade_edge_with_event(
                             &mut st.db,
                             e,
-                            1,
+                            fsrs::Rating::Again,
                             today_days,
                             "bot_deviation",
                         );
@@ -4200,6 +4218,7 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
             )));
             app.set_drill_instructions(slint::SharedString::from("Your move."));
             state.drill_expected = mine;
+            state.drill_prompt_at = Some(std::time::Instant::now());
             return;
         }
         // Opponent's turn: auto-play a random opponent edge, or end if none.
