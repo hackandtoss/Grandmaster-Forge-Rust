@@ -293,6 +293,7 @@ pub struct CourseProgress {
     pub learned_lines: u32,
     pub mastered_lines: u32,
     pub due_lines: u32,
+    pub weak_lines: u32,
 }
 
 /// One normalized learning event: any reviewable target (repertoire move,
@@ -1273,6 +1274,34 @@ impl SqliteStore {
             .map_err(|e| e.to_string())
     }
 
+    /// A move is weak when its 3 most recent review events contain at least
+    /// 2 failures (rating <= 2) or any bot-play deviation. Failures age out of
+    /// the window as newer successful reviews land.
+    fn move_is_weak(&self, move_id: i64) -> Result<bool, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT rating, source FROM review_events
+                 WHERE target_type = 'repertoire_move' AND target_id = ?1
+                 ORDER BY created_at DESC, id DESC LIMIT 3",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([move_id.to_string()], |row| {
+                Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut failures = 0;
+        for row in rows {
+            let (rating, source) = row.map_err(|e| e.to_string())?;
+            if source == "bot_deviation" {
+                return Ok(true);
+            }
+            failures += i32::from(rating <= 2);
+        }
+        Ok(failures >= 2)
+    }
+
     pub fn course_line_status(&self, line_id: &str, today: &str) -> Result<String, String> {
         let line_exists = self
             .conn
@@ -1290,7 +1319,7 @@ impl SqliteStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT COALESCE(m.srs_reps, 0), COALESCE(m.srs_due_date, '')
+                "SELECT m.id, COALESCE(m.srs_reps, 0), COALESCE(m.srs_due_date, '')
                  FROM course_line_moves clm
                  JOIN repertoire_moves m ON m.id = clm.move_id
                  WHERE clm.line_id = ?1 AND clm.is_required = 1 AND m.is_my_move = 1",
@@ -1298,7 +1327,11 @@ impl SqliteStore {
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([line_id], |row| {
-                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })
             .map_err(|e| e.to_string())?;
 
@@ -1307,18 +1340,34 @@ impl SqliteStore {
         let mut passed = 0;
         let mut mastered = 0;
         let mut due = false;
+        let mut move_ids = Vec::new();
         for row in rows {
-            let (reps, due_date) = row.map_err(|e| e.to_string())?;
+            let (move_id, reps, due_date) = row.map_err(|e| e.to_string())?;
             required += 1;
             attempted += u32::from(reps > 0 || !due_date.is_empty());
             passed += u32::from(reps > 0);
             // ponytail: SM-2 reps >= 2 is the temporary stability proxy; replace it with FSRS stability.
             mastered += u32::from(reps >= 2);
             due |= due_date.is_empty() || due_date.as_str() <= today;
+            move_ids.push(move_id);
+        }
+
+        // Weak outranks the SRS-derived statuses (except Undiscovered):
+        // repeated recent failure is the more actionable signal.
+        let mut weak = false;
+        if required > 0 && attempted > 0 {
+            for move_id in &move_ids {
+                if self.move_is_weak(*move_id)? {
+                    weak = true;
+                    break;
+                }
+            }
         }
 
         let status = if required == 0 || attempted == 0 {
             "Undiscovered"
+        } else if weak {
+            "Weak"
         } else if passed < required {
             "Learning"
         } else if due {
@@ -1357,6 +1406,10 @@ impl SqliteStore {
                         progress.discovered_lines += 1;
                         progress.learned_lines += 1;
                         progress.due_lines += 1;
+                    }
+                    "Weak" => {
+                        progress.discovered_lines += 1;
+                        progress.weak_lines += 1;
                     }
                     status => return Err(format!("unknown course line status: {status}")),
                 }
@@ -1889,6 +1942,116 @@ mod tests {
         (course, chapter, line)
     }
 
+    fn add_review_event(
+        store: &mut SqliteStore,
+        id: &str,
+        move_id: i64,
+        rating: i32,
+        source: &str,
+        created_at: &str,
+    ) {
+        store
+            .insert_review_event(&ReviewEventRecord {
+                id: id.to_string(),
+                user_id: "default_user".to_string(),
+                target_type: "repertoire_move".to_string(),
+                target_id: move_id.to_string(),
+                rating,
+                source: source.to_string(),
+                course_id: None,
+                line_id: None,
+                move_id: Some(move_id),
+                created_at: created_at.to_string(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn course_line_status_derives_weak_from_recent_event_history() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+        let root = store
+            .ensure_repertoire_node("a w - - 0 1", "White")
+            .unwrap();
+        let child = store
+            .ensure_repertoire_node("b b - - 0 1", "White")
+            .unwrap();
+        let (move_id, _) = store
+            .insert_repertoire_move(root, child, "e2e4", "e4", true, "manual")
+            .unwrap();
+        add_test_course(&mut store, root);
+        store
+            .set_course_line_moves("line", &[(move_id, 0, true)])
+            .unwrap();
+        store
+            .update_repertoire_move_srs(move_id, 1.0, 2.5, 1, "2026-07-20")
+            .unwrap();
+
+        // Passed once, not due: Learned, and no events means never Weak.
+        assert_eq!(
+            store.course_line_status("line", "2026-07-10").unwrap(),
+            "Learned"
+        );
+
+        // Two failures inside the 3-event window: Weak.
+        add_review_event(&mut store, "e1", move_id, 1, "drill", "2026-07-08");
+        add_review_event(&mut store, "e2", move_id, 1, "drill", "2026-07-09");
+        assert_eq!(
+            store.course_line_status("line", "2026-07-10").unwrap(),
+            "Weak"
+        );
+
+        // Two later passes push the failures out of the window: recovers.
+        add_review_event(&mut store, "e3", move_id, 5, "drill", "2026-07-11");
+        add_review_event(&mut store, "e4", move_id, 5, "drill", "2026-07-12");
+        assert_eq!(
+            store.course_line_status("line", "2026-07-10").unwrap(),
+            "Learned"
+        );
+
+        // A bot deviation inside the window marks the line Weak on its own.
+        add_review_event(
+            &mut store,
+            "e5",
+            move_id,
+            1,
+            "bot_deviation",
+            "2026-07-13",
+        );
+        assert_eq!(
+            store.course_line_status("line", "2026-07-10").unwrap(),
+            "Weak"
+        );
+
+        // An undiscovered line stays Undiscovered even with failure events.
+        let child2 = store
+            .ensure_repertoire_node("c w - - 0 1", "White")
+            .unwrap();
+        let (move2, _) = store
+            .insert_repertoire_move(child, child2, "e7e5", "e5", true, "manual")
+            .unwrap();
+        store
+            .insert_course_line(&CourseLineRecord {
+                id: "line2".to_string(),
+                chapter_id: "chapter".to_string(),
+                title: "Line 2".to_string(),
+                description: String::new(),
+                root_node_id: child,
+                sort_order: 30,
+                pgn: None,
+            })
+            .unwrap();
+        store
+            .set_course_line_moves("line2", &[(move2, 0, true)])
+            .unwrap();
+        add_review_event(&mut store, "f1", move2, 1, "drill", "2026-07-08");
+        add_review_event(&mut store, "f2", move2, 1, "drill", "2026-07-09");
+        assert_eq!(
+            store.course_line_status("line2", "2026-07-10").unwrap(),
+            "Undiscovered"
+        );
+    }
+
     #[test]
     fn ensure_uncategorized_chapter_creates_white_and_black_fallbacks() {
         let mut store = SqliteStore::new_in_memory().unwrap();
@@ -2142,7 +2305,7 @@ mod tests {
                 discovered_lines: 1,
                 learned_lines: 1,
                 mastered_lines: 1,
-                due_lines: 0,
+                ..CourseProgress::default()
             }
         );
 
@@ -2157,9 +2320,24 @@ mod tests {
                 learned_lines: 1,
                 mastered_lines: 0,
                 due_lines: 1,
+                ..CourseProgress::default()
             }
         );
         assert!(store.course_progress("missing", "2026-07-10").is_err());
+
+        // Two recent failures make the line Weak, which counts as discovered
+        // and weak but no longer due/mastered.
+        add_review_event(&mut store, "w1", move_id, 1, "drill", "2026-07-08");
+        add_review_event(&mut store, "w2", move_id, 1, "drill", "2026-07-09");
+        assert_eq!(
+            store.course_progress("course", "2026-07-10").unwrap(),
+            CourseProgress {
+                total_lines: 1,
+                discovered_lines: 1,
+                weak_lines: 1,
+                ..CourseProgress::default()
+            }
+        );
     }
 
     #[test]
