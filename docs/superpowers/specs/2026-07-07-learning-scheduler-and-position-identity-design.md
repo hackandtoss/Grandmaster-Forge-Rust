@@ -40,6 +40,8 @@ Do not migrate to `sled` or `sqlx` just because they are plausible Rust choices.
 
 ## FSRS Migration Rule
 
+**IMPLEMENTED 2026-07-11** — see `docs/superpowers/specs/2026-07-11-fsrs-migration-design.md` and PR #15: SM-2 removed (`srs.rs` deleted), conservative migration at bootstrap (due dates untouched, idempotent), automatic ratings from drill behavior (no self-report UI). Open questions answered: FSRS schedules move edges only (motifs do not exist yet); bot deviations rate Again — FSRS has no rating below Again, and deviations additionally drive the `Weak` line status.
+
 FSRS should replace SM-2, not run beside it indefinitely.
 
 Expected mapping:

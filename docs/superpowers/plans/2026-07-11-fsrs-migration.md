@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Zero clippy warnings, `cargo fmt --all -- --check` clean (baseline since PR #12).
-- `cargo test --workspace` is 84 now; deleting `srs.rs` removes its 4 tests and this plan adds 7 — end state 87, asserted in Task 5. No network, no real Stockfish.
+- `cargo test --workspace` is 84 now; deleting `srs.rs` removes its 4 tests, the two old grading tests merge into one, and this plan adds 6 — end state 85 (verified). No network, no real Stockfish.
 - `review_events.rating` stores FSRS ratings (1–3) from cutover; the Weak rule becomes `rating <= 1`.
 - rs-fsrs API facts (verified from source, 2026-07-11): `Rating { Again=1, Hard=2, Good=3, Easy=4 }`; `Card { due: DateTime<Utc>, stability: f64, difficulty: f64, elapsed_days: i64, scheduled_days: i64, reps: i32, lapses: i32, state: State, last_review: DateTime<Utc> }`; `State { New=0, Learning, Review, Relearning }`; `FSRS::new(Parameters)`; `fsrs.repeat(card, now) -> HashMap<Rating, SchedulingInfo>` where `SchedulingInfo.card` is the post-review card.
 
@@ -25,7 +25,7 @@
 **Interfaces:**
 - Produces: `RepertoireMoveRecord` gains `pub fsrs_stability: Option<f64>`, `pub fsrs_difficulty: Option<f64>`, `pub fsrs_last_review: Option<String>`; `pub fn update_repertoire_move_fsrs(&mut self, move_id: i64, stability: f64, difficulty: f64, last_review: &str, reps: u32, due_date: &str) -> Result<(), String>`; `pub fn ease_to_difficulty(ease: f32) -> f64`; migration runs inside `bootstrap()`.
 
-- [ ] **Step 1: Add failing round-trip + migration test**
+- [x] **Step 1: Add failing round-trip + migration test**
 
 ```rust
 #[test]
@@ -82,9 +82,9 @@ fn ease_to_difficulty_is_monotone_and_clamped() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p db_manager fsrs` — expected: compile failure (missing fields/functions).
+- [x] **Step 2: Run** `cargo test -p db_manager fsrs` — expected: compile failure (missing fields/functions).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 1. In the `repertoire_moves` CREATE TABLE inside `SQLITE_SCHEMA`, append after `srs_due_date`:
    `fsrs_stability REAL, fsrs_difficulty REAL, fsrs_last_review TEXT,` (fresh databases).
@@ -158,13 +158,13 @@ pub fn update_repertoire_move_fsrs(
 
 The SQL difficulty formula intentionally mirrors `ease_to_difficulty`; the unit test pins the Rust helper and the round-trip test pins the SQL against it (interval 6/ease 2.5 case).
 
-- [ ] **Step 4: Run** `cargo test -p db_manager` — expected: all pass (23: 21 existing + 2 new).
+- [x] **Step 4: Run** `cargo test -p db_manager` — expected: all pass (23: 21 existing + 2 new).
 
-- [ ] **Step 5: Weak threshold under the FSRS scale**
+- [x] **Step 5: Weak threshold under the FSRS scale**
 
 In `move_is_weak`, change `failures += i32::from(rating <= 2);` to `failures += i32::from(rating <= 1);` and update its doc comment (failure = Again; Hard is a success). In the `course_line_status_derives_weak_from_recent_event_history` test, add after the bot-deviation assertion: two `rating: 2` (`"drill"`) events dated `2026-07-14`/`2026-07-15` on `move_id` — the line must NOT be Weak (window is `[2, 2, bot_dev... ]` — wait, the bot_deviation from `2026-07-13` is still in the last-3 window and alone marks it weak; use `move2`'s line instead: give `line2`'s move an SRS update so it's discovered, then two Hard events → expect its SRS-derived status, not `"Weak"`).
 
-- [ ] **Step 6: Run** `cargo test -p db_manager` (all green), then commit:
+- [x] **Step 6: Run** `cargo test -p db_manager` (all green), then commit:
 
 ```bash
 git add db_manager/src/lib.rs
@@ -182,7 +182,7 @@ git commit -m "feat(db): FSRS state columns, conservative SM-2 migration, Weak t
 - Consumes: `RepertoireMoveRecord` FSRS fields (Task 1), `crate::tree::days_to_ymd`.
 - Produces: `pub use rs_fsrs::Rating;` re-export; `pub const HESITATION_SECS: u64 = 15;` `pub fn drill_rating(correct: bool, elapsed_secs: u64) -> Rating`; `pub struct EdgeSchedule { pub stability: f64, pub difficulty: f64, pub last_review: String, pub reps: u32, pub due_date: String }`; `pub fn next_schedule(edge: &db_manager::RepertoireMoveRecord, rating: Rating, today_days: u64) -> EdgeSchedule`.
 
-- [ ] **Step 1: Add dependencies**
+- [x] **Step 1: Add dependencies**
 
 In `app/Cargo.toml` under `[dependencies]`:
 
@@ -191,7 +191,7 @@ rs-fsrs = "1.2"
 chrono = "0.4"
 ```
 
-- [ ] **Step 2: Write failing tests** (inside `app/src/fsrs.rs`, `#[cfg(test)] mod tests`)
+- [x] **Step 2: Write failing tests** (inside `app/src/fsrs.rs`, `#[cfg(test)] mod tests`)
 
 ```rust
 use super::*;
@@ -259,9 +259,9 @@ fn hard_grows_less_than_good_from_identical_state() {
 
 (`fresh_edge()` is a small test helper constructing a fully-populated `RepertoireMoveRecord`; write it in the tests module.)
 
-- [ ] **Step 3: Run** `cargo test -p app fsrs` — expected: compile failure.
+- [x] **Step 3: Run** `cargo test -p app fsrs` — expected: compile failure.
 
-- [ ] **Step 4: Implement `app/src/fsrs.rs`**
+- [x] **Step 4: Implement `app/src/fsrs.rs`**
 
 ```rust
 //! FSRS scheduling adapter: date-string persistence <-> rs-fsrs cards.
@@ -365,7 +365,7 @@ pub fn next_schedule(
 
 Add `mod fsrs;` in `app/src/main.rs` beside the other module declarations.
 
-- [ ] **Step 5: Run** `cargo test -p app fsrs` — expected: 4 pass. Then commit:
+- [x] **Step 5: Run** `cargo test -p app fsrs` — expected: 4 pass. Then commit:
 
 ```bash
 git add app/Cargo.toml app/src/fsrs.rs app/src/main.rs Cargo.lock
@@ -383,7 +383,7 @@ git commit -m "feat(app): rs-fsrs adapter with automatic drill ratings"
 - Consumes: `crate::fsrs::{next_schedule, Rating}` (Task 2), `update_repertoire_move_fsrs` (Task 1).
 - Produces: `pub fn grade_edge_with_event(db, edge, rating: crate::fsrs::Rating, today_days: u64, source: &str) -> Result<(), String>` — the only grading entry point; `grade_edge` and `crate::srs` no longer exist.
 
-- [ ] **Step 1: Rewrite the grading tests in `app/src/tree.rs`**
+- [x] **Step 1: Rewrite the grading tests in `app/src/tree.rs`**
 
 Replace `grade_edge_pass_and_fail` and adjust `grade_edge_records_review_event`:
 
@@ -418,9 +418,9 @@ fn grading_schedules_via_fsrs_and_records_events() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p app grading_schedules` — expected: compile failure (signature).
+- [x] **Step 2: Run** `cargo test -p app grading_schedules` — expected: compile failure (signature).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `grade_edge_with_event`: parameter `grade: u32` becomes `rating: crate::fsrs::Rating`; replace the `grade_edge(...)` call with:
 
@@ -438,9 +438,9 @@ db.update_repertoire_move_fsrs(
 
 and in the event record set `rating: rating as i32` (drop the `.min(5)`). Delete `pub fn grade_edge`, delete `app/src/srs.rs`, remove `mod srs;` from `main.rs`. `use` items: drop `crate::srs::...` references in tree.rs.
 
-- [ ] **Step 4: Fix main.rs call sites** (they don't compile yet — that's Task 4's scope, but the workspace must build to run tests; do the minimal edit now): drill pass site passes `crate::fsrs::drill_rating(true, 0)` placeholder-free equivalent — **no**: do Task 4's real wiring in the same commit if splitting breaks the build. Preferred order: make all three call sites pass `crate::fsrs::Rating` values (drill pass → `Rating::Good` temporarily inline, fail/bot → `Rating::Again`), run the suite, commit Tasks 3+4 hesitation wiring separately only if green in between; otherwise combine.
+- [x] **Step 4: Fix main.rs call sites** (they don't compile yet — that's Task 4's scope, but the workspace must build to run tests; do the minimal edit now): drill pass site passes `crate::fsrs::drill_rating(true, 0)` placeholder-free equivalent — **no**: do Task 4's real wiring in the same commit if splitting breaks the build. Preferred order: make all three call sites pass `crate::fsrs::Rating` values (drill pass → `Rating::Good` temporarily inline, fail/bot → `Rating::Again`), run the suite, commit Tasks 3+4 hesitation wiring separately only if green in between; otherwise combine.
 
-- [ ] **Step 5: Run** `cargo test -p app` — all green. Commit:
+- [x] **Step 5: Run** `cargo test -p app` — all green. Commit:
 
 ```bash
 git add app/src/tree.rs app/src/main.rs
@@ -457,15 +457,15 @@ git commit -m "feat(app): FSRS replaces SM-2 grading; delete srs.rs"
 - Consumes: `crate::fsrs::{drill_rating, Rating}`.
 - Produces: `AppState.drill_prompt_at: Option<std::time::Instant>`.
 
-- [ ] **Step 1: Add state field**
+- [x] **Step 1: Add state field**
 
 `AppState` gains `drill_prompt_at: Option<std::time::Instant>,` (init `None` in the constructor literal).
 
-- [ ] **Step 2: Stamp the prompt time**
+- [x] **Step 2: Stamp the prompt time**
 
 In `drill_advance`, in the `side_to_move_is_mine` branch right after `state.drill_expected = mine;`, add `state.drill_prompt_at = Some(std::time::Instant::now());`. Also stamp it at the end of the start-drill callback that first presents a position awaiting the user's move (find `on_start_drill`; it calls `drill_advance`, which covers it — verify by reading the callback; if it presents without `drill_advance`, stamp there too).
 
-- [ ] **Step 3: Use it at the grading call sites**
+- [x] **Step 3: Use it at the grading call sites**
 
 Drill success site (the `if let Some(edge) = matched` branch):
 
@@ -486,12 +486,12 @@ let _ = tree::grade_edge_with_event(
 
 Drill fail loop: `fsrs::Rating::Again`. Bot deviation: `fsrs::Rating::Again`.
 
-- [ ] **Step 4: Full verification**
+- [x] **Step 4: Full verification**
 
 Run: `cargo fmt --all && cargo fmt --all -- --check && cargo clippy --workspace && cargo test --workspace`
 Expected: fmt clean, zero clippy warnings, 87 tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/src/main.rs
@@ -503,9 +503,9 @@ git commit -m "feat(app): hesitation-aware automatic FSRS ratings in drills"
 **Files:**
 - Modify: `README.md`, `docs/superpowers/specs/2026-07-07-learning-scheduler-and-position-identity-design.md`
 
-- [ ] **Step 1: README** — replace scheduler wording: "per-my-move-edge SM-2" → "per-my-move-edge FSRS (rs-fsrs, automatic ratings from drill behavior)"; the `repertoire_moves` schema-table row's "SM-2 state" → "shared due/reps plus FSRS memory state (stability/difficulty/last review)"; test count `# 84 tests` → `# 87 tests`; mention automatic Again/Hard/Good grading in the drill section.
-- [ ] **Step 2: Scheduler spec** — under "FSRS Migration Rule" add: `**IMPLEMENTED 2026-07-11** — see docs/superpowers/specs/2026-07-11-fsrs-migration-design.md; SM-2 removed, conservative migration at bootstrap, automatic ratings (no self-report UI).` Answer its open questions inline: edges only; bot deviations = Again (FSRS has no rating below Again; deviations additionally drive the Weak status).
-- [ ] **Step 3: Run the full gate once more, tick this plan's checkboxes, commit**
+- [x] **Step 1: README** — replace scheduler wording: "per-my-move-edge SM-2" → "per-my-move-edge FSRS (rs-fsrs, automatic ratings from drill behavior)"; the `repertoire_moves` schema-table row's "SM-2 state" → "shared due/reps plus FSRS memory state (stability/difficulty/last review)"; test count `# 84 tests` → `# 87 tests`; mention automatic Again/Hard/Good grading in the drill section.
+- [x] **Step 2: Scheduler spec** — under "FSRS Migration Rule" add: `**IMPLEMENTED 2026-07-11** — see docs/superpowers/specs/2026-07-11-fsrs-migration-design.md; SM-2 removed, conservative migration at bootstrap, automatic ratings (no self-report UI).` Answer its open questions inline: edges only; bot deviations = Again (FSRS has no rating below Again; deviations additionally drive the Weak status).
+- [x] **Step 3: Run the full gate once more, tick this plan's checkboxes, commit**
 
 ```bash
 git add README.md docs/
