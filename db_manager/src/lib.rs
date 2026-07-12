@@ -2010,14 +2010,7 @@ mod tests {
         );
 
         // A bot deviation inside the window marks the line Weak on its own.
-        add_review_event(
-            &mut store,
-            "e5",
-            move_id,
-            1,
-            "bot_deviation",
-            "2026-07-13",
-        );
+        add_review_event(&mut store, "e5", move_id, 1, "bot_deviation", "2026-07-13");
         assert_eq!(
             store.course_line_status("line", "2026-07-10").unwrap(),
             "Weak"

@@ -1424,12 +1424,20 @@ fn accuracy_summary_text(accuracy: Option<f32>) -> String {
     }
 }
 
-fn course_progress_text(total_lines: i32, mastered_lines: i32, due_lines: i32) -> String {
+fn course_progress_text(
+    total_lines: i32,
+    mastered_lines: i32,
+    due_lines: i32,
+    weak_lines: i32,
+) -> String {
+    let mut text = format!("{mastered_lines}/{total_lines} mastered");
     if due_lines > 0 {
-        format!("{mastered_lines}/{total_lines} mastered - {due_lines} due")
-    } else {
-        format!("{mastered_lines}/{total_lines} mastered")
+        text.push_str(&format!(" - {due_lines} due"));
     }
+    if weak_lines > 0 {
+        text.push_str(&format!(" - {weak_lines} weak"));
+    }
+    text
 }
 
 fn course_detail_entries(db: &SqliteStore, course_id: &str, today: &str) -> Vec<CourseDetailEntry> {
@@ -1711,13 +1719,11 @@ fn record_puzzle_event(state: &mut AppState, solved: bool) {
     let _ = state.db.insert_training_event(&event);
     // Write through to the normalized spine as well; the training_events row
     // above stays because get_puzzle_rating still reads its score_delta.
-    let _ = state
-        .db
-        .insert_review_event(&puzzle_review_event(
-            &puzzle.id,
-            solved,
-            &tree::local_now_str(),
-        ));
+    let _ = state.db.insert_review_event(&puzzle_review_event(
+        &puzzle.id,
+        solved,
+        &tree::local_now_str(),
+    ));
 }
 
 /// Replay a puzzle's UCI solution from its FEN and render it as SAN.
@@ -2006,10 +2012,13 @@ fn main() {
                 let total = progress.total_lines as i32;
                 let mastered = progress.mastered_lines as i32;
                 let due = progress.due_lines as i32;
+                let weak = progress.weak_lines as i32;
                 line_entries.push(OpeningLineEntry {
                     id: slint::SharedString::from(course.id.clone()),
                     name: slint::SharedString::from(course.title.clone()),
-                    moves: slint::SharedString::from(course_progress_text(total, mastered, due)),
+                    moves: slint::SharedString::from(course_progress_text(
+                        total, mastered, due, weak,
+                    )),
                     confidence: if total == 0 {
                         0.0
                     } else {
@@ -2061,6 +2070,7 @@ fn main() {
                             progress.total_lines as i32,
                             progress.mastered_lines as i32,
                             progress.due_lines as i32,
+                            progress.weak_lines as i32,
                         )
                     },
                 );
@@ -4203,9 +4213,9 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
 mod tests {
     use super::{
         accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, course_progress_text,
-        puzzle_review_event,
         fen_to_pieces, game_review_summary, lichess_puzzle_to_record, puzzle_progress_text,
-        review_stat_entries, sk_fen, solution_to_san, starter_puzzles, updated_puzzle_rating,
+        puzzle_review_event, review_stat_entries, sk_fen, solution_to_san, starter_puzzles,
+        updated_puzzle_rating,
     };
     use shakmaty::uci::Uci;
     use shakmaty::{CastlingMode, Chess, Position};
@@ -4357,8 +4367,13 @@ mod tests {
 
     #[test]
     fn course_progress_text_reports_mastered_and_due_lines() {
-        assert_eq!(course_progress_text(3, 2, 1), "2/3 mastered - 1 due");
-        assert_eq!(course_progress_text(3, 3, 0), "3/3 mastered");
+        assert_eq!(course_progress_text(3, 2, 1, 0), "2/3 mastered - 1 due");
+        assert_eq!(
+            course_progress_text(3, 2, 1, 1),
+            "2/3 mastered - 1 due - 1 weak"
+        );
+        assert_eq!(course_progress_text(3, 1, 0, 2), "1/3 mastered - 2 weak");
+        assert_eq!(course_progress_text(3, 3, 0, 0), "3/3 mastered");
     }
 
     #[test]

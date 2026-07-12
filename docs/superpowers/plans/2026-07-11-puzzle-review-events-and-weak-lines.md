@@ -21,51 +21,51 @@ Requires `review_events` (PR #11). Do not implement FSRS, motif labels, or game-
 **Files:**
 - Modify: `db_manager/src/lib.rs`
 
-- [ ] **Step 1: Add failing status test**
+- [x] **Step 1: Add failing status test**
 
 Extend the existing course-status tests with a `Weak` scenario: a line whose single required move has events `[fail, fail, pass]` (most recent first) is `Weak`; after two more passes (`[pass, pass, fail]` window) it is not; a required move whose last-3 window contains a `bot_deviation` event is `Weak`; a line with no events keeps its current status; an `Undiscovered` line is never `Weak`.
 
-- [ ] **Step 2: Run failing test** — `cargo test -p db_manager weak`
+- [x] **Step 2: Run failing test** — `cargo test -p db_manager weak`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add a private `move_is_weak(&self, move_id: i64)` that selects `rating, source` from `review_events WHERE target_type='repertoire_move' AND target_id=?1 ORDER BY created_at DESC, id DESC LIMIT 3` and applies the rule. In `course_line_status`, also select `m.id` for required moves; when the pre-Weak status is not `Undiscovered`, return `Weak` if any required move is weak (checked before the `Learning` branch).
 
-- [ ] **Step 4: Add weak_lines to CourseProgress**
+- [x] **Step 4: Add weak_lines to CourseProgress**
 
 `CourseProgress` gains `weak_lines: u32`; `course_progress` handles the `Weak` arm (counts as discovered + weak). Extend the progress test.
 
-- [ ] **Step 5: Run tests, commit**
+- [x] **Step 5: Run tests, commit**
 
 ## Task 2: Puzzle Results As Review Events
 
 **Files:**
 - Modify: `app/src/main.rs`
 
-- [ ] **Step 1: Add failing pure-helper test**
+- [x] **Step 1: Add failing pure-helper test**
 
 `puzzle_review_event(puzzle_id: &str, solved: bool, created_at: &str) -> db_manager::ReviewEventRecord` — asserts: `target_type == "puzzle"`, `target_id` is the puzzle id, rating 5 on pass / 1 on fail, `source == "puzzle_trainer"`, no course/line/move context, unique ids across two calls.
 
-- [ ] **Step 2: Run failing test** — `cargo test -p app puzzle_review_event`
+- [x] **Step 2: Run failing test** — `cargo test -p app puzzle_review_event`
 
-- [ ] **Step 3: Implement helper and wire**
+- [x] **Step 3: Implement helper and wire**
 
 Helper builds the record (id: `puzzle-<id>-<uuid_now()>`). In `record_puzzle_event`, insert it alongside the existing `training_events` write (which `get_puzzle_rating` still needs).
 
-- [ ] **Step 4: Run tests, commit**
+- [x] **Step 4: Run tests, commit**
 
 ## Task 3: Surface Weak Counts In Course Progress Text
 
 **Files:**
 - Modify: `app/src/main.rs`
 
-- [ ] **Step 1: Extend course_progress_text test**
+- [x] **Step 1: Extend course_progress_text test**
 
 `course_progress_text(total, mastered, due, weak)`: `(3, 2, 1, 0)` → `"2/3 mastered - 1 due"`; `(3, 2, 1, 1)` → `"2/3 mastered - 1 due - 1 weak"`; `(3, 3, 0, 0)` → `"3/3 mastered"`.
 
-- [ ] **Step 2: Update helper and both call sites** (course cards refresh + selected-course header) to pass `progress.weak_lines`. Line detail rows already render the status string, so `Weak` appears there with no change.
+- [x] **Step 2: Update helper and both call sites** (course cards refresh + selected-course header) to pass `progress.weak_lines`. Line detail rows already render the status string, so `Weak` appears there with no change.
 
-- [ ] **Step 3: Run app tests, build, commit**
+- [x] **Step 3: Run app tests, build, commit**
 
 ## Self-Review
 
