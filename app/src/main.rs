@@ -3668,11 +3668,16 @@ fn main() {
 // Simple unique id generator helper
 fn uuid_now() -> String {
     use std::time::SystemTime;
+    // Micros alone can collide when two ids are minted in the same clock
+    // tick (e.g. the drill-fail loop or back-to-back review events); a
+    // process-local sequence keeps every id unique.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let since_the_epoch = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros();
-    format!("{:x}", since_the_epoch)
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{:x}-{:x}", since_the_epoch, seq)
 }
 
 /// Bot plays one move: from the user's book if possible, else via Stockfish PlaySession.
