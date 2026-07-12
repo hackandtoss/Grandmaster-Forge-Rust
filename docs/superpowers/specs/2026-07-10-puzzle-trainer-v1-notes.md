@@ -28,9 +28,11 @@ Resolution: `LichessPuzzle` now deserializes the real response shape (verified a
 
 Resolution: puzzle attempts now also write a normalized `review_events` row (target_type `puzzle`, rating 5/1 on pass/fail, source `puzzle_trainer`) via `puzzle_review_event` (`docs/superpowers/plans/2026-07-11-puzzle-review-events-and-weak-lines.md`). The `training_events` write remains only because `get_puzzle_rating` still reads its `score_delta` as the absolute rating; new consumers should read `review_events` instead, and the legacy write can be dropped once the dashboard rating migrates.
 
-### 3. Board orientation
+### 3. Board orientation — ADDRESSED 2026-07-11
 
-The board always renders White at the bottom. Black-to-move puzzles are playable (the status line states the side to move) but not flipped. Same limitation as Play vs Bot as Black; a shared board-flip option would fix both.
+Original gap: the board always rendered White at the bottom; Black-to-move puzzles were playable but not flipped, same limitation as Play vs Bot as Black.
+
+Resolution: the shared `ChessBoard` component now takes a `flipped` property (view-level 180-degree rotation; model coordinates unchanged). The Puzzle Trainer auto-flips from the puzzle FEN's side to move and Play vs Bot flips when playing Black, each with a manual "Flip Board" toggle — see `docs/superpowers/specs/2026-07-11-board-flip-design.md`.
 
 ### 4. Deliberately deferred
 

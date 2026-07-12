@@ -106,6 +106,7 @@ Near-term direction: add a tactical scrutinizer on top of the existing game-revi
 - Puzzles stored in DB with FEN, solution UCI line, theme, and difficulty; `load-puzzle` picks a random puzzle up to a difficulty ceiling
 - "Fetch Puzzles from Lichess" pulls a small batch (~10) from `/api/puzzle/next` on a background thread; the API returns the game PGN plus `initialPly` (no FEN), so each puzzle's FEN is derived by replaying the PGN with shakmaty — themes are comma-joined and the Lichess rating maps to difficulty (requires `LICHESS_API_KEY`)
 - Five built-in starter mate puzzles are seeded idempotently on launch so the trainer works before the first Lichess fetch
+- Board auto-flips so the solver's side is at the bottom (Black-to-move puzzles render Black-down); Play vs Bot flips when you play Black — both screens have a manual "Flip Board" toggle
 - Pass/fail is recorded once per puzzle to `training_events` (kind `puzzle`); the stored value is the updated puzzle rating, which feeds the dashboard's Training Rating stat
 - Dashboard "Start Activity" routes the PuzzleRush recommendation to the Puzzle Trainer
 
@@ -220,5 +221,5 @@ cargo run --release -p app
 
 ```bash
 cargo test --workspace
-# 83 tests across db_manager (incl. course metadata/status, review events, Weak lines), app (srs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
+# 84 tests across db_manager (incl. course metadata/status, review events, Weak lines), app (srs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
 ```

@@ -101,6 +101,11 @@ slint::slint! {
         in property <int> selected-square: -1;
         in property <color> highlight-color: #fcd34d;
         in property <bool> interactive: true;
+        // View-level 180-degree rotation: cell `index` keeps its model meaning
+        // (a8 = 0, White's perspective) for pieces/selection/clicks; only where
+        // it is DRAWN changes. 63 - index reverses both file and rank, and
+        // preserves square color parity, so the checker formula needs no change.
+        in property <bool> flipped: false;
         callback square-clicked(int);
 
         pure function piece-symbol(piece: string) -> string {
@@ -151,8 +156,8 @@ slint::slint! {
             height: root.board-size;
 
             for index in 64: Rectangle {
-                x: mod(index, 8) * root.cell-size;
-                y: floor(index / 8) * root.cell-size;
+                x: mod(root.flipped ? 63 - index : index, 8) * root.cell-size;
+                y: floor((root.flipped ? 63 - index : index) / 8) * root.cell-size;
                 width: root.cell-size;
                 height: root.cell-size;
                 background: (root.selected-square == index)
@@ -447,6 +452,8 @@ slint::slint! {
         in-out property <string> puzzle-solution-text: "";
         in-out property <bool> puzzle-active: false;
         in-out property <string> puzzle-fetch-status: "";
+        in-out property <bool> puzzle-board-flipped: false;
+        in-out property <bool> play-board-flipped: false;
 
         // Callbacks
         callback select-screen(string);
@@ -1273,6 +1280,7 @@ slint::slint! {
                     ChessBoard {
                         pieces: root.play-board-pieces;
                         selected-square: root.play-selected-square;
+                        flipped: root.play-board-flipped;
                         square-clicked(index) => { root.play-click-square(index); }
                     }
                     // Controls
@@ -1305,6 +1313,10 @@ slint::slint! {
                             text: "New Game";
                             clicked => { root.play-new-game(root.play-color, elo-input.text.to-float()); }
                         }
+                        Button {
+                            text: "Flip Board";
+                            clicked => { root.play-board-flipped = !root.play-board-flipped; }
+                        }
                         if (root.play-active) : Button {
                             text: "Resign";
                             clicked => { root.play-resign(); }
@@ -1326,6 +1338,7 @@ slint::slint! {
                     ChessBoard {
                         pieces: root.puzzle-board-pieces;
                         selected-square: root.puzzle-selected-square;
+                        flipped: root.puzzle-board-flipped;
                         square-clicked(index) => { root.puzzle-click-square(index); }
                     }
                     // Controls
@@ -1335,6 +1348,10 @@ slint::slint! {
                         Button {
                             text: root.puzzle-active ? "Skip / New Puzzle" : "New Puzzle";
                             clicked => { root.load-puzzle(); }
+                        }
+                        Button {
+                            text: "Flip Board";
+                            clicked => { root.puzzle-board-flipped = !root.puzzle-board-flipped; }
                         }
                         Text { text: root.puzzle-meta; color: #a78bfa; font-size: 13px; wrap: word-wrap; width: 300px; }
                         Text { text: root.puzzle-progress; color: #a1a1aa; font-size: 12px; }
@@ -2723,6 +2740,7 @@ fn main() {
                         slint::VecModel::from(fen_to_pieces(&puzzle.fen)),
                     )));
                     app.set_puzzle_selected_square(-1);
+                    app.set_puzzle_board_flipped(side_to_move_label(&puzzle.fen) == "Black");
                     app.set_puzzle_meta(slint::SharedString::from(format!(
                         "{} • rating {}",
                         puzzle.theme.replace(',', ", "),
@@ -3475,6 +3493,7 @@ fn main() {
             st.play_left_book_at = None;
             app.set_play_elo(elo);
             app.set_play_active(true);
+            app.set_play_board_flipped(st.play_side == "Black");
             app.set_play_summary(slint::SharedString::from(""));
             app.set_play_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
                 fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"),
@@ -4219,8 +4238,8 @@ mod tests {
     use super::{
         accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, course_progress_text,
         fen_to_pieces, game_review_summary, lichess_puzzle_to_record, puzzle_progress_text,
-        puzzle_review_event, review_stat_entries, sk_fen, solution_to_san, starter_puzzles,
-        updated_puzzle_rating,
+        puzzle_review_event, review_stat_entries, side_to_move_label, sk_fen, solution_to_san,
+        starter_puzzles, updated_puzzle_rating,
     };
     use shakmaty::uci::Uci;
     use shakmaty::{CastlingMode, Chess, Position};
@@ -4471,6 +4490,21 @@ mod tests {
         assert_eq!(updated_puzzle_rating(1500, false), 1490);
         assert_eq!(updated_puzzle_rating(400, false), 400);
         assert_eq!(updated_puzzle_rating(3200, true), 3200);
+    }
+
+    #[test]
+    fn side_to_move_label_reads_fen_and_defaults_to_white() {
+        assert_eq!(
+            side_to_move_label("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
+            "White"
+        );
+        assert_eq!(
+            side_to_move_label("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1"),
+            "Black"
+        );
+        // Malformed FEN must fail toward White-at-bottom (spec: never block loading).
+        assert_eq!(side_to_move_label(""), "White");
+        assert_eq!(side_to_move_label("not a fen"), "White");
     }
 
     #[test]
