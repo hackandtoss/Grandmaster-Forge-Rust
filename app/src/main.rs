@@ -452,6 +452,7 @@ slint::slint! {
         in-out property <string> puzzle-solution-text: "";
         in-out property <bool> puzzle-active: false;
         in-out property <string> puzzle-fetch-status: "";
+        in-out property <bool> puzzle-board-flipped: false;
 
         // Callbacks
         callback select-screen(string);
@@ -1331,6 +1332,7 @@ slint::slint! {
                     ChessBoard {
                         pieces: root.puzzle-board-pieces;
                         selected-square: root.puzzle-selected-square;
+                        flipped: root.puzzle-board-flipped;
                         square-clicked(index) => { root.puzzle-click-square(index); }
                     }
                     // Controls
@@ -1340,6 +1342,10 @@ slint::slint! {
                         Button {
                             text: root.puzzle-active ? "Skip / New Puzzle" : "New Puzzle";
                             clicked => { root.load-puzzle(); }
+                        }
+                        Button {
+                            text: "Flip Board";
+                            clicked => { root.puzzle-board-flipped = !root.puzzle-board-flipped; }
                         }
                         Text { text: root.puzzle-meta; color: #a78bfa; font-size: 13px; wrap: word-wrap; width: 300px; }
                         Text { text: root.puzzle-progress; color: #a1a1aa; font-size: 12px; }
@@ -2728,6 +2734,7 @@ fn main() {
                         slint::VecModel::from(fen_to_pieces(&puzzle.fen)),
                     )));
                     app.set_puzzle_selected_square(-1);
+                    app.set_puzzle_board_flipped(side_to_move_label(&puzzle.fen) == "Black");
                     app.set_puzzle_meta(slint::SharedString::from(format!(
                         "{} • rating {}",
                         puzzle.theme.replace(',', ", "),
