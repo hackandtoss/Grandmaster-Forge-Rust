@@ -65,6 +65,7 @@ pub fn add_move_edge(
 }
 
 /// Walk a UCI line from start_fen, inserting every move. Returns count of NEW edges.
+#[cfg(test)]
 pub fn import_uci_line(
     db: &mut SqliteStore,
     start_fen: &str,
@@ -82,6 +83,160 @@ pub fn import_uci_line(
         fen = child;
     }
     Ok(new_edges)
+}
+
+fn validate_course_chapter(db: &SqliteStore, chapter_id: &str, side: &str) -> Result<(), String> {
+    let chapter = db
+        .get_course_chapter(chapter_id)?
+        .ok_or_else(|| format!("course chapter not found: {chapter_id}"))?;
+    let course = db
+        .get_course(&chapter.course_id)?
+        .ok_or_else(|| format!("course not found: {}", chapter.course_id))?;
+    if course.side != "Mixed" && course.side != side {
+        return Err(format!(
+            "course {} is for {}, not {side}",
+            course.id, course.side
+        ));
+    }
+    Ok(())
+}
+
+fn insert_uci_course_line(
+    db: &mut SqliteStore,
+    start_fen: &str,
+    moves: &[String],
+    side: &str,
+    source: &str,
+    chapter_id: &str,
+    line_title: &str,
+    line_key: &str,
+    sort_order: i32,
+    pgn: Option<String>,
+) -> Result<String, String> {
+    if moves.is_empty() {
+        return Err("cannot create a course line with no moves".to_string());
+    }
+
+    let mut fen = start_fen.to_string();
+    let mut root_node_id = None;
+    let mut line_moves = Vec::with_capacity(moves.len());
+    for (ply_index, uci) in moves.iter().enumerate() {
+        let (edge_id, child_fen, _) = add_move_edge(db, &fen, uci, side, source)?;
+        let edge = db
+            .get_repertoire_move(edge_id)?
+            .ok_or_else(|| format!("inserted repertoire move missing: {edge_id}"))?;
+        root_node_id.get_or_insert(edge.parent_id);
+        line_moves.push((edge_id, ply_index as i32, edge.is_my_move));
+        fen = child_fen;
+    }
+
+    let line_id = format!("{chapter_id}:{source}:{line_key}:{}", moves.join("-"));
+    db.insert_course_line(&db_manager::CourseLineRecord {
+        id: line_id.clone(),
+        chapter_id: chapter_id.to_string(),
+        title: line_title.to_string(),
+        description: String::new(),
+        root_node_id: root_node_id.expect("non-empty moves set a root node"),
+        sort_order,
+        pgn,
+    })?;
+    db.set_course_line_moves(&line_id, &line_moves)?;
+    Ok(line_id)
+}
+
+/// Insert a legal UCI path into the repertoire graph and attach that exact path
+/// to a named course line. Only user-owned edges are required for line status.
+pub fn import_uci_line_as_course_line(
+    db: &mut SqliteStore,
+    start_fen: &str,
+    moves: &[String],
+    side: &str,
+    source: &str,
+    chapter_id: &str,
+    line_title: &str,
+) -> Result<String, String> {
+    validate_course_chapter(db, chapter_id, side)?;
+    let title = line_title.trim();
+    let title = if title.is_empty() {
+        "Untitled Line"
+    } else {
+        title
+    };
+    insert_uci_course_line(
+        db, start_fen, moves, side, source, chapter_id, title, title, 0, None,
+    )
+}
+
+fn pgn_line_title(parsed: &pgn_processor::ParsedGame, index: usize) -> String {
+    for header in ["ChapterName", "Event", "Opening"] {
+        if let Some(value) = parsed
+            .headers
+            .get(header)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty() && *value != "?")
+        {
+            return value.to_string();
+        }
+    }
+    let moves = parsed
+        .moves
+        .iter()
+        .take(4)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if moves.is_empty() {
+        format!("Imported Line {}", index + 1)
+    } else {
+        moves
+    }
+}
+
+/// Import every PGN variation into the shared repertoire graph, then add one
+/// named course line for each game's mainline. Returns (new edges, named lines).
+pub fn import_pgn_as_course_lines(
+    db: &mut SqliteStore,
+    pgn: &str,
+    side: &str,
+    source: &str,
+    chapter_id: &str,
+) -> Result<(u32, u32), String> {
+    validate_course_chapter(db, chapter_id, side)?;
+    let walked = pgn_processor::walk_pgn_variations(pgn)?;
+    let new_edges = import_walked(db, &walked, side, source)?;
+    let mut named_lines = 0;
+
+    // ponytail: flattened WalkedMove values lose branch provenance; add path-aware
+    // parser output when named variation lines are required.
+    for (index, game) in pgn_processor::split_games(pgn).into_iter().enumerate() {
+        let parsed = pgn_processor::parse_pgn(&game);
+        let Ok(fens_and_moves) = pgn_processor::game_to_fen_and_uci(&parsed.moves) else {
+            continue;
+        };
+        let Some((start_fen, _)) = fens_and_moves.first() else {
+            continue;
+        };
+        let moves = fens_and_moves
+            .iter()
+            .map(|(_, uci)| uci.clone())
+            .collect::<Vec<_>>();
+        let title = pgn_line_title(&parsed, index);
+        insert_uci_course_line(
+            db,
+            start_fen,
+            &moves,
+            side,
+            source,
+            chapter_id,
+            &title,
+            &format!("{index}-{title}"),
+            index as i32,
+            Some(game.trim().to_string()),
+        )?;
+        named_lines += 1;
+    }
+
+    Ok((new_edges, named_lines))
 }
 
 /// Apply an SM-2 grade to a single repertoire edge and persist the new schedule.
@@ -225,7 +380,9 @@ pub fn migrate_legacy_lines(db: &mut SqliteStore) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use db_manager::{OpeningLineRecord, SqliteStore, TrainingStore};
+    use db_manager::{
+        CourseChapterRecord, CourseRecord, OpeningLineRecord, SqliteStore, TrainingStore,
+    };
 
     const START: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -234,6 +391,30 @@ mod tests {
         s.bootstrap().unwrap();
         s.run_migrations().unwrap();
         s
+    }
+
+    fn add_course_target(db: &mut SqliteStore, side: &str) -> String {
+        let course_id = format!("course-{}", side.to_lowercase());
+        let chapter_id = format!("{course_id}-main");
+        db.insert_course(&CourseRecord {
+            id: course_id.clone(),
+            title: format!("{side} Course"),
+            description: String::new(),
+            side: side.to_string(),
+            source: "personal".to_string(),
+            tags: String::new(),
+            thumbnail_fen: START.to_string(),
+        })
+        .unwrap();
+        db.insert_course_chapter(&CourseChapterRecord {
+            id: chapter_id.clone(),
+            course_id,
+            title: "Main".to_string(),
+            description: String::new(),
+            sort_order: 0,
+        })
+        .unwrap();
+        chapter_id
     }
 
     #[test]
@@ -283,6 +464,103 @@ mod tests {
         // so the second import adds 4 new edges too — but both funnel into ONE node:
         assert_eq!(n2, 4);
         // and from the shared final position, later continuations are shared.
+    }
+
+    #[test]
+    fn import_uci_line_with_course_keeps_order_and_requires_only_my_moves() {
+        let mut db = mem_store();
+        let chapter_id = add_course_target(&mut db, "White");
+        let moves = ["e2e4", "e7e5", "g1f3"]
+            .iter()
+            .map(|uci| uci.to_string())
+            .collect::<Vec<_>>();
+
+        let line_id = import_uci_line_as_course_line(
+            &mut db,
+            START,
+            &moves,
+            "White",
+            "manual",
+            &chapter_id,
+            "Open Game",
+        )
+        .unwrap();
+
+        let attached = db.get_course_line_moves(&line_id).unwrap();
+        assert_eq!(
+            attached
+                .iter()
+                .map(|(_, ply, required)| (*ply, *required))
+                .collect::<Vec<_>>(),
+            vec![(0, true), (1, false), (2, true)]
+        );
+        assert_eq!(
+            attached
+                .iter()
+                .map(|(id, _, _)| db.get_repertoire_move(*id).unwrap().unwrap().uci)
+                .collect::<Vec<_>>(),
+            moves
+        );
+
+        let black_chapter = add_course_target(&mut db, "Black");
+        let before = db.repertoire_move_count().unwrap();
+        let error = import_uci_line_as_course_line(
+            &mut db,
+            START,
+            &moves,
+            "White",
+            "manual",
+            &black_chapter,
+            "Wrong Target",
+        )
+        .unwrap_err();
+        assert!(error.contains("is for Black, not White"));
+        assert_eq!(db.repertoire_move_count().unwrap(), before);
+    }
+
+    #[test]
+    fn import_pgn_as_course_lines_names_mainlines_and_keeps_variations() {
+        let mut db = mem_store();
+        let chapter_id = add_course_target(&mut db, "White");
+        let pgn = r#"[Event "King Pawn Main"]
+
+1. e4 e5 (1... c5) 2. Nf3 *
+
+[Event "?"]
+[Opening "Queen's Pawn"]
+
+1. d4 d5 *"#;
+
+        assert_eq!(
+            import_pgn_as_course_lines(&mut db, pgn, "White", "pgn", &chapter_id).unwrap(),
+            (6, 2)
+        );
+        let lines = db.get_course_lines(&chapter_id).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].title, "King Pawn Main");
+        assert_eq!(lines[1].title, "Queen's Pawn");
+        assert!(lines[0].pgn.as_deref().unwrap().contains("King Pawn Main"));
+        assert_eq!(
+            db.get_course_line_moves(&lines[0].id)
+                .unwrap()
+                .iter()
+                .map(|(_, _, required)| *required)
+                .collect::<Vec<_>>(),
+            vec![true, false, true]
+        );
+        assert_eq!(db.get_course_line_moves(&lines[1].id).unwrap().len(), 2);
+
+        let walked = pgn_processor::walk_pgn_variations(pgn).unwrap();
+        let after_e4 = &walked.iter().find(|w| w.uci == "e2e4").unwrap().child_fen;
+        let replies = db.get_repertoire_moves_from(after_e4, "White").unwrap();
+        assert!(replies.iter().any(|edge| edge.uci == "e7e5"));
+        assert!(replies.iter().any(|edge| edge.uci == "c7c5"));
+
+        assert_eq!(
+            import_pgn_as_course_lines(&mut db, pgn, "White", "pgn", &chapter_id).unwrap(),
+            (0, 2)
+        );
+        assert_eq!(db.get_course_lines(&chapter_id).unwrap().len(), 2);
     }
 
     #[test]

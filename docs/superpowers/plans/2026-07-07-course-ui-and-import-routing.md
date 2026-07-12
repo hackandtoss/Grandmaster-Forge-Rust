@@ -4,7 +4,7 @@
 
 **Goal:** Replace source-grouped fake courses with real course cards and route new repertoire imports into a real course/chapter/line container.
 
-**Architecture:** Build on `2026-07-07-opening-course-metadata-and-status.md`. Keep the current Slint monolith and existing graph import helpers. Add an "Uncategorized" fallback course so old flows can keep working without blocking on full course-picking UI.
+**Architecture:** Build on `2026-07-07-opening-course-metadata-and-status.md`. Keep the current Slint monolith and existing graph import helpers. A compact course/chapter picker defaults to an on-demand Uncategorized chapter when no explicit target is selected.
 
 **Tech Stack:** Rust 2021, Slint 1.6, rusqlite 0.31, existing `app/src/main.rs`, `app/src/tree.rs`, `db_manager`.
 
@@ -14,12 +14,19 @@
 
 Complete `docs/superpowers/plans/2026-07-07-opening-course-metadata-and-status.md` first.
 
+## Implementation Notes
+
+- Implemented together on 2026-07-10 as one shippable change rather than the intermediate commits below.
+- The current app showed individual due edges, not source-grouped cards; the checked implementation replaces that list with real course cards and an in-place chapter/line detail view.
+- Pasted PGN and study imports keep every variation in the shared graph and add one named course line per game mainline. Named variation paths remain deferred until parser output preserves branch provenance.
+- The code samples below remain the original TDD sketches; the checked implementation and tests are authoritative where they differ.
+
 ## Task 1: Add Uncategorized Course Helper
 
 **Files:**
 - Modify: `db_manager/src/lib.rs`
 
-- [ ] **Step 1: Add failing helper test**
+- [x] **Step 1: Add failing helper test**
 
 Add to `db_manager/src/lib.rs` tests:
 
@@ -48,7 +55,7 @@ Run: `cargo test -p db_manager ensure_uncategorized_course_creates_course_and_ch
 
 Expected: compile failure because `ensure_uncategorized_chapter` does not exist.
 
-- [ ] **Step 3: Implement helper**
+- [x] **Step 3: Implement helper**
 
 Add to `impl SqliteStore`:
 
@@ -77,25 +84,25 @@ pub fn ensure_uncategorized_chapter(&mut self, side: &str) -> Result<String, Str
 }
 ```
 
-- [ ] **Step 4: Run test**
+- [x] **Step 4: Run test**
 
 Run: `cargo test -p db_manager ensure_uncategorized_course_creates_course_and_chapter`
 
 Expected: pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit (included in the combined course UI/import routing change)**
 
 ```bash
 git add db_manager/src/lib.rs
 git commit -m "feat(db): add uncategorized course fallback"
 ```
 
-## Task 2: Show Real Courses In Repertoire Browser
+## Task 2: Show Real Courses And Course Detail In Repertoire Browser
 
 **Files:**
 - Modify: `app/src/main.rs`
 
-- [ ] **Step 1: Add a pure helper test for course progress labels**
+- [x] **Step 1: Add a pure helper test for course progress labels**
 
 Add near existing tests in `app/src/main.rs`:
 
@@ -113,7 +120,7 @@ Run: `cargo test -p app course_progress_text_reports_mastered_and_due_lines`
 
 Expected: compile failure because `course_progress_text` does not exist.
 
-- [ ] **Step 3: Add helper**
+- [x] **Step 3: Add helper**
 
 Add near `repertoire_course_name` in `app/src/main.rs`:
 
@@ -127,7 +134,7 @@ fn course_progress_text(total_lines: i32, mastered_lines: i32, due_lines: i32) -
 }
 ```
 
-- [ ] **Step 4: Replace source-grouped refresh query**
+- [x] **Step 4: Replace the due-edge refresh with course cards, course progress, and selected-course chapter/line detail**
 
 In `refresh_data`, replace the current "Refresh repertoire moves as course-style groups" block with a query over real courses:
 
@@ -178,33 +185,33 @@ app.set_opening_lines(slint::ModelRc::from(Rc::new(slint::VecModel::from(line_en
 
 This intentionally keeps the existing `OpeningLineEntry` Slint struct for the first UI cut.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `cargo test -p app course_progress_text_reports_mastered_and_due_lines`
 
 Expected: pass.
 
-- [ ] **Step 6: Build**
+- [x] **Step 6: Build**
 
 Run: `cargo check -p app`
 
 Expected: pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit (included in the combined course UI/import routing change)**
 
 ```bash
 git add app/src/main.rs
 git commit -m "feat(app): show real opening courses in repertoire browser"
 ```
 
-## Task 3: Attach Manual Builder Saves To Uncategorized Course
+## Task 3: Route Manual Builder Saves Into A Selected Course Chapter
 
 **Files:**
 - Modify: `app/src/tree.rs`
 - Modify: `app/src/main.rs`
 - Test: `app/src/tree.rs`
 
-- [ ] **Step 1: Add failing tree helper test**
+- [x] **Step 1: Add failing tree helper test**
 
 Add to `app/src/tree.rs` tests:
 
@@ -236,7 +243,7 @@ Run: `cargo test -p app import_uci_line_with_course_creates_named_line_path`
 
 Expected: compile failure because helper does not exist.
 
-- [ ] **Step 3: Add helper**
+- [x] **Step 3: Add helper**
 
 Add to `app/src/tree.rs`:
 
@@ -259,7 +266,7 @@ pub fn import_uci_line_as_course_line(
         if idx == 0 {
             root_node_id = Some(edge.parent_id);
         }
-        move_ids.push((edge_id, idx as i32, true));
+        move_ids.push((edge_id, idx as i32, edge.is_my_move));
         fen = child;
     }
     let root_node_id = root_node_id.ok_or_else(|| "cannot create a course line with no moves".to_string())?;
@@ -278,13 +285,13 @@ pub fn import_uci_line_as_course_line(
 }
 ```
 
-- [ ] **Step 4: Run test**
+- [x] **Step 4: Run test**
 
 Run: `cargo test -p app import_uci_line_with_course_creates_named_line_path`
 
 Expected: pass.
 
-- [ ] **Step 5: Wire builder save**
+- [x] **Step 5: Wire builder save**
 
 In `app/src/main.rs`, find `on_builder_save_line`. Replace the final `tree::import_uci_line(...)` call with:
 
@@ -324,22 +331,31 @@ match result {
 }
 ```
 
-- [ ] **Step 6: Build**
+- [x] **Step 6: Build**
 
 Run: `cargo check -p app`
 
 Expected: pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit (included in the combined course UI/import routing change)**
 
 ```bash
 git add app/src/tree.rs app/src/main.rs
 git commit -m "feat(app): route manual opening lines into course metadata"
 ```
 
+## Task 4: Route PGN And Study Imports Into Courses
+
+- [x] Add a compact course/chapter target picker shared by builder and import screens.
+- [x] Treat an empty target as the side-specific Uncategorized fallback.
+- [x] Keep all imported PGN variations in the repertoire graph and attach each game mainline as a named course line.
+- [x] Route pasted PGN and Lichess study imports through the selected target.
+- [x] Add focused mainline-metadata and variation-retention tests.
+
 ## Self-Review
 
-- Spec coverage: real course display and first import routing path are covered.
-- Deferred by design: full course picker, PGN/study/explorer target UI, seed course packs, visual catalog card redesign.
+- Spec coverage: real course cards, course detail chapters/named lines, derived course progress, and selected chapter routing for manual, PGN, and study flows are covered.
+- Deferred by design: named variation-path metadata, Explorer target routing, seed course packs, visual catalog redesign, `Weak`, FSRS, and Zobrist.
+- Graph integrity: course lines reference ordered existing `repertoire_moves`; no second chess graph was added.
 - Placeholder scan: no placeholders.
 - Type consistency: depends on `CourseRecord`, `CourseChapterRecord`, `CourseLineRecord`, `ensure_uncategorized_chapter`, `course_line_status`, `set_course_line_moves`.

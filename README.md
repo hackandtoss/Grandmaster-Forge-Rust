@@ -1,6 +1,6 @@
 # Grandmaster Forge
 
-A Rust desktop chess training platform combining ideas from Lichess, Chess.com, AIMchess, ChessReps, and ChessIgma — opening repertoire tree builder, per-move-edge spaced-repetition drills, play vs a book-driven bot, game review with engine analysis, weakness profiling, puzzles, and Lichess + Chess.com sync.
+A Rust desktop chess training platform combining ideas from Lichess, Chess.com, AIMchess, ChessReps, and ChessIgma — course-based opening repertoire builder, per-move-edge spaced-repetition drills, play vs a book-driven bot, game review with engine analysis, weakness profiling, puzzles, and Lichess + Chess.com sync.
 
 ---
 
@@ -21,16 +21,18 @@ Near-term direction: add a tactical scrutinizer on top of the existing game-revi
 
 ## Features
 
-### Opening Repertoire Builder
-- Interactive 8×8 board with two-click move entry, undo, and reset
-- White/Black color picker — the trainer knows which side you play
-- Name and save lines directly to your repertoire
-- "Suggest from Last PGN" extracts the first 15 opening moves from your most recently imported game (SAN→UCI via shakmaty) and pre-loads them for editing
+### Opening Courses & Repertoire Builder
+- Browse real course cards backed by `courses`, with progress derived from child named-line statuses
+- Open a course to see its chapters and named lines marked `Undiscovered`, `Learning`, `Learned`, `Mastered`, or `Review Due`
+- Interactive 8×8 builder with two-click move entry, undo, reset, and White/Black selection
+- Name and save lines into a selected course/chapter; an `Uncategorized <side> Repertoire / Main` chapter is created on demand when no target is chosen
+- "Suggest from Last PGN" extracts the first 15 opening moves from the most recently imported game (SAN→UCI via shakmaty) and pre-loads them for editing
 
 ### Import Lines (PGN variations + Lichess studies)
 - Paste multi-game PGN with nested variations — a recursive walker flattens every branch into normalized-FEN move edges
-- "Sync My Lichess Studies" pulls your studies through the same import pipeline
-- Each imported edge is tagged with your repertoire side and becomes immediately drillable
+- Choose an existing course/chapter or leave the target at Uncategorized for PGN and Lichess study imports
+- Imported game mainlines store ordered references to existing `repertoire_moves`; course metadata does not create a second chess graph
+- Every imported variation edge is tagged with the repertoire side and remains available to the graph-based drill engine
 
 ### Explorer Adopt
 - Browse the Lichess opening explorer from any board position
@@ -116,7 +118,7 @@ Grandmaster-Forge-Rust/
 ├── app/                  # Slint desktop app — main binary, all UI and callbacks
 │   └── src/
 │       ├── main.rs       # slint! macro, AppState, all on_* callback wiring
-│       ├── tree.rs       # Repertoire position tree: position_key, edge insert/walk, grade_edge, legacy migration
+│       ├── tree.rs       # Repertoire position graph: position_key, edge insert/walk, course routing, grade_edge
 │       ├── srs.rs        # SM-2 algorithm (review(), SrsCard)
 │       ├── accuracy.rs   # Chess.com accuracy formula, phase breakdown
 │       ├── weakness.rs   # WeaknessReport builder
@@ -166,8 +168,12 @@ Planned learning upgrades:
 |---|---|
 | `games` | Imported/synced games with accuracy columns |
 | `positions` | Per-ply FEN, centipawn loss, mistake class |
-| `repertoire_nodes` | Repertoire tree positions: normalized FEN + side (White/Black) |
+| `repertoire_nodes` | Repertoire graph positions: normalized FEN + side (White/Black) |
 | `repertoire_moves` | Move edges between nodes, each carrying its own SM-2 state (interval/ease/reps/due) and is-my-move flag |
+| `courses` | User-visible opening course metadata, side, source, tags, and thumbnail FEN |
+| `course_chapters` | Ordered chapter metadata within a course |
+| `course_lines` | Named course lines rooted at existing repertoire graph nodes |
+| `course_line_moves` | Ordered references from named lines to existing `repertoire_moves`, including required-user-move flags |
 | `opening_tree` | Master-game BFS tree nodes |
 | `puzzles` | Puzzle positions with solution and difficulty |
 | `training_events` | Log of every drill/puzzle/review outcome |
@@ -213,5 +219,5 @@ cargo run --release -p app
 
 ```bash
 cargo test --workspace
-# 74 tests across db_manager (incl. course metadata/status), app (srs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
+# 79 tests across db_manager (incl. course metadata/status), app (srs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
 ```

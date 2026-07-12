@@ -272,6 +272,15 @@ pub struct CourseLineRecord {
     pub pgn: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CourseProgress {
+    pub total_lines: u32,
+    pub discovered_lines: u32,
+    pub learned_lines: u32,
+    pub mastered_lines: u32,
+    pub due_lines: u32,
+}
+
 pub trait TrainingStore {
     fn bootstrap(&mut self) -> Result<(), String>;
     fn insert_opening_line(&mut self, line: &OpeningLineRecord) -> Result<(), String>;
@@ -977,6 +986,33 @@ impl SqliteStore {
             .map_err(|e| e.to_string())
     }
 
+    pub fn ensure_uncategorized_chapter(&mut self, side: &str) -> Result<String, String> {
+        let side_id = match side {
+            "White" => "white",
+            "Black" => "black",
+            _ => return Err("course side must be White or Black".to_string()),
+        };
+        let course_id = format!("uncategorized-{side_id}");
+        let chapter_id = format!("{course_id}-main");
+        self.insert_course(&CourseRecord {
+            id: course_id.clone(),
+            title: format!("Uncategorized {side} Repertoire"),
+            description: "Imported or manually added lines waiting to be organized.".to_string(),
+            side: side.to_string(),
+            source: "personal".to_string(),
+            tags: "uncategorized".to_string(),
+            thumbnail_fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string(),
+        })?;
+        self.insert_course_chapter(&CourseChapterRecord {
+            id: chapter_id.clone(),
+            course_id,
+            title: "Main".to_string(),
+            description: "Default holding chapter.".to_string(),
+            sort_order: 0,
+        })?;
+        Ok(chapter_id)
+    }
+
     pub fn delete_course(&mut self, course_id: &str) -> Result<bool, String> {
         self.conn
             .execute("DELETE FROM courses WHERE id = ?1", [course_id])
@@ -1262,6 +1298,40 @@ impl SqliteStore {
             "Learned"
         };
         Ok(status.to_string())
+    }
+
+    pub fn course_progress(&self, course_id: &str, today: &str) -> Result<CourseProgress, String> {
+        if self.get_course(course_id)?.is_none() {
+            return Err(format!("course not found: {course_id}"));
+        }
+
+        let mut progress = CourseProgress::default();
+        // ponytail: reuse the canonical per-line status; aggregate SQL can replace this if catalogs measure slow.
+        for chapter in self.get_course_chapters(course_id)? {
+            for line in self.get_course_lines(&chapter.id)? {
+                progress.total_lines += 1;
+                match self.course_line_status(&line.id, today)?.as_str() {
+                    "Undiscovered" => {}
+                    "Learning" => progress.discovered_lines += 1,
+                    "Learned" => {
+                        progress.discovered_lines += 1;
+                        progress.learned_lines += 1;
+                    }
+                    "Mastered" => {
+                        progress.discovered_lines += 1;
+                        progress.learned_lines += 1;
+                        progress.mastered_lines += 1;
+                    }
+                    "Review Due" => {
+                        progress.discovered_lines += 1;
+                        progress.learned_lines += 1;
+                        progress.due_lines += 1;
+                    }
+                    status => return Err(format!("unknown course line status: {status}")),
+                }
+            }
+        }
+        Ok(progress)
     }
 
     pub fn is_synced(&self, source: &str, external_id: &str) -> bool {
@@ -1731,6 +1801,37 @@ mod tests {
     }
 
     #[test]
+    fn ensure_uncategorized_chapter_creates_white_and_black_fallbacks() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+
+        for (side, course_id, chapter_id) in [
+            ("White", "uncategorized-white", "uncategorized-white-main"),
+            ("Black", "uncategorized-black", "uncategorized-black-main"),
+        ] {
+            assert_eq!(
+                store.ensure_uncategorized_chapter(side).unwrap(),
+                chapter_id
+            );
+            assert_eq!(
+                store.ensure_uncategorized_chapter(side).unwrap(),
+                chapter_id
+            );
+            assert_eq!(store.get_course(course_id).unwrap().unwrap().side, side);
+            let chapters = store.get_course_chapters(course_id).unwrap();
+            assert_eq!(chapters.len(), 1);
+            assert_eq!(chapters[0].id, chapter_id);
+        }
+
+        assert_eq!(
+            store.ensure_uncategorized_chapter("Mixed").unwrap_err(),
+            "course side must be White or Black"
+        );
+        assert!(store.ensure_uncategorized_chapter("white").is_err());
+        assert_eq!(store.get_courses().unwrap().len(), 2);
+    }
+
+    #[test]
     fn course_chapter_line_crud_round_trip() {
         let mut store = SqliteStore::new_in_memory().unwrap();
         store.bootstrap().unwrap();
@@ -1901,5 +2002,74 @@ mod tests {
             store.course_line_status("line", "2026-07-07").unwrap(),
             "Mastered"
         );
+    }
+
+    #[test]
+    fn course_progress_follows_child_line_status() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+        let root = store
+            .ensure_repertoire_node("a w - - 0 1", "White")
+            .unwrap();
+        let child = store
+            .ensure_repertoire_node("b b - - 0 1", "White")
+            .unwrap();
+        let (move_id, _) = store
+            .insert_repertoire_move(root, child, "e2e4", "e4", true, "manual")
+            .unwrap();
+        add_test_course(&mut store, root);
+        store
+            .set_course_line_moves("line", &[(move_id, 0, true)])
+            .unwrap();
+
+        assert_eq!(
+            store.course_progress("course", "2026-07-10").unwrap(),
+            CourseProgress {
+                total_lines: 1,
+                ..CourseProgress::default()
+            }
+        );
+
+        store
+            .update_repertoire_move_srs(move_id, 1.0, 2.5, 1, "2026-07-11")
+            .unwrap();
+        assert_eq!(
+            store.course_progress("course", "2026-07-10").unwrap(),
+            CourseProgress {
+                total_lines: 1,
+                discovered_lines: 1,
+                learned_lines: 1,
+                ..CourseProgress::default()
+            }
+        );
+
+        store
+            .update_repertoire_move_srs(move_id, 6.0, 2.5, 2, "2026-07-11")
+            .unwrap();
+        assert_eq!(
+            store.course_progress("course", "2026-07-10").unwrap(),
+            CourseProgress {
+                total_lines: 1,
+                discovered_lines: 1,
+                learned_lines: 1,
+                mastered_lines: 1,
+                due_lines: 0,
+            }
+        );
+
+        store
+            .update_repertoire_move_srs(move_id, 6.0, 2.5, 2, "2026-07-10")
+            .unwrap();
+        assert_eq!(
+            store.course_progress("course", "2026-07-10").unwrap(),
+            CourseProgress {
+                total_lines: 1,
+                discovered_lines: 1,
+                learned_lines: 1,
+                mastered_lines: 0,
+                due_lines: 1,
+            }
+        );
+        assert!(store.course_progress("missing", "2026-07-10").is_err());
     }
 }
