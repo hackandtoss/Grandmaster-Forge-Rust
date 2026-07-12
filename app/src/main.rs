@@ -101,6 +101,11 @@ slint::slint! {
         in property <int> selected-square: -1;
         in property <color> highlight-color: #fcd34d;
         in property <bool> interactive: true;
+        // View-level 180-degree rotation: cell `index` keeps its model meaning
+        // (a8 = 0, White's perspective) for pieces/selection/clicks; only where
+        // it is DRAWN changes. 63 - index reverses both file and rank, and
+        // preserves square color parity, so the checker formula needs no change.
+        in property <bool> flipped: false;
         callback square-clicked(int);
 
         pure function piece-symbol(piece: string) -> string {
@@ -151,8 +156,8 @@ slint::slint! {
             height: root.board-size;
 
             for index in 64: Rectangle {
-                x: mod(index, 8) * root.cell-size;
-                y: floor(index / 8) * root.cell-size;
+                x: mod(root.flipped ? 63 - index : index, 8) * root.cell-size;
+                y: floor((root.flipped ? 63 - index : index) / 8) * root.cell-size;
                 width: root.cell-size;
                 height: root.cell-size;
                 background: (root.selected-square == index)
