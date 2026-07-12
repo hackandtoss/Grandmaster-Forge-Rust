@@ -4219,8 +4219,8 @@ mod tests {
     use super::{
         accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, course_progress_text,
         fen_to_pieces, game_review_summary, lichess_puzzle_to_record, puzzle_progress_text,
-        puzzle_review_event, review_stat_entries, sk_fen, solution_to_san, starter_puzzles,
-        updated_puzzle_rating,
+        puzzle_review_event, review_stat_entries, side_to_move_label, sk_fen, solution_to_san,
+        starter_puzzles, updated_puzzle_rating,
     };
     use shakmaty::uci::Uci;
     use shakmaty::{CastlingMode, Chess, Position};
@@ -4471,6 +4471,21 @@ mod tests {
         assert_eq!(updated_puzzle_rating(1500, false), 1490);
         assert_eq!(updated_puzzle_rating(400, false), 400);
         assert_eq!(updated_puzzle_rating(3200, true), 3200);
+    }
+
+    #[test]
+    fn side_to_move_label_reads_fen_and_defaults_to_white() {
+        assert_eq!(
+            side_to_move_label("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
+            "White"
+        );
+        assert_eq!(
+            side_to_move_label("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1"),
+            "Black"
+        );
+        // Malformed FEN must fail toward White-at-bottom (spec: never block loading).
+        assert_eq!(side_to_move_label(""), "White");
+        assert_eq!(side_to_move_label("not a fen"), "White");
     }
 
     #[test]
