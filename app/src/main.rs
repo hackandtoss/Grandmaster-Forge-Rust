@@ -446,6 +446,7 @@ slint::slint! {
         in-out property <string> puzzle-progress: "";
         in-out property <string> puzzle-solution-text: "";
         in-out property <bool> puzzle-active: false;
+        in-out property <string> puzzle-fetch-status: "";
 
         // Callbacks
         callback select-screen(string);
@@ -482,6 +483,7 @@ slint::slint! {
         // Puzzle trainer callbacks (load-puzzle above loads a random puzzle)
         callback puzzle-click-square(int);
         callback puzzle-show-solution();
+        callback fetch-lichess-puzzles();
 
         HorizontalLayout {
             // Sidebar
@@ -1358,6 +1360,11 @@ slint::slint! {
                             clicked => { root.puzzle-show-solution(); }
                         }
                         Text { text: root.puzzle-solution-text; color: #fbbf24; font-size: 13px; wrap: word-wrap; width: 300px; }
+                        Button {
+                            text: "Fetch Puzzles from Lichess";
+                            clicked => { root.fetch-lichess-puzzles(); }
+                        }
+                        Text { text: root.puzzle-fetch-status; color: #a1a1aa; font-size: 12px; wrap: word-wrap; width: 300px; }
                     }
                 }
 
@@ -1638,6 +1645,29 @@ fn starter_puzzles() -> Vec<PuzzleRecord> {
             1200,
         ),
     ]
+}
+
+/// Convert a fetched Lichess puzzle into our stored convention: FEN is the
+/// position to solve (solver to move, derived from the game PGN and
+/// `initialPly`), `solution_uci` runs from the solver's side, themes are
+/// comma-joined, and the Lichess rating maps to difficulty.
+fn lichess_puzzle_to_record(
+    fetched: &lichess_client::puzzles::LichessPuzzle,
+) -> Result<PuzzleRecord, String> {
+    if fetched.puzzle.solution.is_empty() {
+        return Err("empty solution".to_string());
+    }
+    let fen = lichess_client::puzzles::puzzle_fen_from_pgn(
+        &fetched.game.pgn,
+        fetched.puzzle.initial_ply,
+    )?;
+    Ok(PuzzleRecord {
+        id: format!("lichess_{}", fetched.puzzle.id),
+        fen,
+        solution_uci: fetched.puzzle.solution.join(" "),
+        theme: fetched.puzzle.themes.join(","),
+        difficulty: fetched.puzzle.rating,
+    })
 }
 
 /// "Move X of Y" counting only the solver's moves (even indices of the
@@ -2697,6 +2727,91 @@ fn main() {
                     "Failed to load a puzzle: {e}"
                 ))),
             }
+        });
+    }
+
+    // Fetch a small batch of real Lichess puzzles into the puzzles table.
+    // Same background-thread pattern as the sync callbacks: network + DB work
+    // happens off the UI thread, status text is set from the event loop.
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        app.on_fetch_lichess_puzzles(move || {
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            std::thread::spawn(move || {
+                let set_status = |aw: &slint::Weak<AppWindow>, msg: String| {
+                    let aw = aw.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(app) = aw.upgrade() {
+                            app.set_puzzle_fetch_status(slint::SharedString::from(msg));
+                        }
+                    });
+                };
+                let token = std::env::var("LICHESS_API_KEY").unwrap_or_default();
+                if token.is_empty() {
+                    set_status(
+                        &app_weak,
+                        "LICHESS_API_KEY is not set — add it to .env to fetch puzzles.".into(),
+                    );
+                    return;
+                }
+                set_status(&app_weak, "Fetching puzzles from Lichess…".into());
+                let client = lichess_client::LichessClient::new(&token);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let mut saved = 0u32;
+                let mut repeats = 0u32;
+                let mut skipped = 0u32;
+                let mut failure: Option<String> = None;
+                let mut seen_ids: Vec<String> = Vec::new();
+                for _ in 0..10 {
+                    match rt.block_on(client.fetch_puzzle()) {
+                        Ok(fetched) => {
+                            // The API may hand back a puzzle already seen in
+                            // this batch; count it instead of re-storing.
+                            if seen_ids.contains(&fetched.puzzle.id) {
+                                repeats += 1;
+                                continue;
+                            }
+                            seen_ids.push(fetched.puzzle.id.clone());
+                            match lichess_puzzle_to_record(&fetched) {
+                                Ok(record) => {
+                                    let mut st = state.lock().unwrap();
+                                    match st.db.insert_puzzle(&record) {
+                                        Ok(()) => saved += 1,
+                                        Err(e) => {
+                                            eprintln!(
+                                                "puzzle fetch: failed to store {}: {e}",
+                                                record.id
+                                            );
+                                            skipped += 1;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "puzzle fetch: cannot derive FEN for {}: {e}",
+                                        fetched.puzzle.id
+                                    );
+                                    skipped += 1;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                let msg = match failure {
+                    Some(e) if saved == 0 => format!("Lichess puzzle fetch failed: {e}"),
+                    Some(e) => format!("Saved {saved} puzzle(s), then fetch failed: {e}"),
+                    None => format!(
+                        "Lichess: {saved} puzzle(s) saved, {repeats} repeat(s), {skipped} skipped."
+                    ),
+                };
+                set_status(&app_weak, msg);
+            });
         });
     }
 
@@ -4071,8 +4186,8 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
 mod tests {
     use super::{
         accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, course_progress_text,
-        fen_to_pieces, game_review_summary, puzzle_progress_text, review_stat_entries, sk_fen,
-        solution_to_san, starter_puzzles, updated_puzzle_rating,
+        fen_to_pieces, game_review_summary, lichess_puzzle_to_record, puzzle_progress_text,
+        review_stat_entries, sk_fen, solution_to_san, starter_puzzles, updated_puzzle_rating,
     };
     use shakmaty::uci::Uci;
     use shakmaty::{CastlingMode, Chess, Position};
@@ -4261,6 +4376,37 @@ mod tests {
         )
         .is_none());
         assert!(solution_to_san("not a fen", &["e2e4".to_string()]).is_none());
+    }
+
+    #[test]
+    fn lichess_puzzle_to_record_follows_stored_convention() {
+        let fetched = lichess_client::puzzles::LichessPuzzle {
+            puzzle: lichess_client::puzzles::PuzzleData {
+                id: "abc12".to_string(),
+                solution: vec!["h5f7".to_string()],
+                themes: vec!["mate".to_string(), "mateIn1".to_string()],
+                rating: 1420,
+                initial_ply: 5,
+            },
+            game: lichess_client::puzzles::PuzzleGame {
+                pgn: "e4 e5 Bc4 Nc6 Qh5 Nf6".to_string(),
+            },
+        };
+        let record = lichess_puzzle_to_record(&fetched).unwrap();
+        assert_eq!(record.id, "lichess_abc12");
+        // Same position as seed_scholars_mate: FEN is the position to solve
+        // with the solver (White) to move.
+        assert_eq!(
+            record.fen,
+            "r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4"
+        );
+        assert_eq!(record.solution_uci, "h5f7");
+        assert_eq!(record.theme, "mate,mateIn1");
+        assert_eq!(record.difficulty, 1420);
+
+        let mut truncated = fetched.clone();
+        truncated.puzzle.solution.clear();
+        assert!(lichess_puzzle_to_record(&truncated).is_err());
     }
 
     #[test]
