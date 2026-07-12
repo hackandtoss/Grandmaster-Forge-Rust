@@ -1424,12 +1424,20 @@ fn accuracy_summary_text(accuracy: Option<f32>) -> String {
     }
 }
 
-fn course_progress_text(total_lines: i32, mastered_lines: i32, due_lines: i32) -> String {
+fn course_progress_text(
+    total_lines: i32,
+    mastered_lines: i32,
+    due_lines: i32,
+    weak_lines: i32,
+) -> String {
+    let mut text = format!("{mastered_lines}/{total_lines} mastered");
     if due_lines > 0 {
-        format!("{mastered_lines}/{total_lines} mastered - {due_lines} due")
-    } else {
-        format!("{mastered_lines}/{total_lines} mastered")
+        text.push_str(&format!(" - {due_lines} due"));
     }
+    if weak_lines > 0 {
+        text.push_str(&format!(" - {weak_lines} weak"));
+    }
+    text
 }
 
 fn course_detail_entries(db: &SqliteStore, course_id: &str, today: &str) -> Vec<CourseDetailEntry> {
@@ -1671,6 +1679,27 @@ fn updated_puzzle_rating(current: i32, solved: bool) -> i32 {
     }
 }
 
+/// Normalized review event for one puzzle attempt: rating 5 on pass, 1 on
+/// fail (SM-2 grade scale, same as drill grading), source `puzzle_trainer`.
+fn puzzle_review_event(
+    puzzle_id: &str,
+    solved: bool,
+    created_at: &str,
+) -> db_manager::ReviewEventRecord {
+    db_manager::ReviewEventRecord {
+        id: format!("puzzle-{}-{}", puzzle_id, uuid_now()),
+        user_id: "default_user".to_string(),
+        target_type: "puzzle".to_string(),
+        target_id: puzzle_id.to_string(),
+        rating: if solved { 5 } else { 1 },
+        source: "puzzle_trainer".to_string(),
+        course_id: None,
+        line_id: None,
+        move_id: None,
+        created_at: created_at.to_string(),
+    }
+}
+
 /// Record a pass/fail training event for the current puzzle and fold the
 /// result into the puzzle rating shown on the dashboard.
 fn record_puzzle_event(state: &mut AppState, solved: bool) {
@@ -1688,6 +1717,13 @@ fn record_puzzle_event(state: &mut AppState, solved: bool) {
         created_at: tree::local_now_str(),
     };
     let _ = state.db.insert_training_event(&event);
+    // Write through to the normalized spine as well; the training_events row
+    // above stays because get_puzzle_rating still reads its score_delta.
+    let _ = state.db.insert_review_event(&puzzle_review_event(
+        &puzzle.id,
+        solved,
+        &tree::local_now_str(),
+    ));
 }
 
 /// Replay a puzzle's UCI solution from its FEN and render it as SAN.
@@ -1976,10 +2012,13 @@ fn main() {
                 let total = progress.total_lines as i32;
                 let mastered = progress.mastered_lines as i32;
                 let due = progress.due_lines as i32;
+                let weak = progress.weak_lines as i32;
                 line_entries.push(OpeningLineEntry {
                     id: slint::SharedString::from(course.id.clone()),
                     name: slint::SharedString::from(course.title.clone()),
-                    moves: slint::SharedString::from(course_progress_text(total, mastered, due)),
+                    moves: slint::SharedString::from(course_progress_text(
+                        total, mastered, due, weak,
+                    )),
                     confidence: if total == 0 {
                         0.0
                     } else {
@@ -2031,6 +2070,7 @@ fn main() {
                             progress.total_lines as i32,
                             progress.mastered_lines as i32,
                             progress.due_lines as i32,
+                            progress.weak_lines as i32,
                         )
                     },
                 );
@@ -3628,11 +3668,16 @@ fn main() {
 // Simple unique id generator helper
 fn uuid_now() -> String {
     use std::time::SystemTime;
+    // Micros alone can collide when two ids are minted in the same clock
+    // tick (e.g. the drill-fail loop or back-to-back review events); a
+    // process-local sequence keeps every id unique.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let since_the_epoch = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros();
-    format!("{:x}", since_the_epoch)
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{:x}-{:x}", since_the_epoch, seq)
 }
 
 /// Bot plays one move: from the user's book if possible, else via Stockfish PlaySession.
@@ -4174,7 +4219,8 @@ mod tests {
     use super::{
         accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, course_progress_text,
         fen_to_pieces, game_review_summary, lichess_puzzle_to_record, puzzle_progress_text,
-        review_stat_entries, sk_fen, solution_to_san, starter_puzzles, updated_puzzle_rating,
+        puzzle_review_event, review_stat_entries, sk_fen, solution_to_san, starter_puzzles,
+        updated_puzzle_rating,
     };
     use shakmaty::uci::Uci;
     use shakmaty::{CastlingMode, Chess, Position};
@@ -4307,9 +4353,32 @@ mod tests {
     }
 
     #[test]
+    fn puzzle_review_event_follows_review_event_conventions() {
+        let passed = puzzle_review_event("lichess_abc12", true, "2026-07-11");
+        assert_eq!(passed.target_type, "puzzle");
+        assert_eq!(passed.target_id, "lichess_abc12");
+        assert_eq!(passed.rating, 5);
+        assert_eq!(passed.source, "puzzle_trainer");
+        assert_eq!(passed.user_id, "default_user");
+        assert_eq!(passed.created_at, "2026-07-11");
+        assert_eq!(passed.course_id, None);
+        assert_eq!(passed.line_id, None);
+        assert_eq!(passed.move_id, None);
+
+        let failed = puzzle_review_event("lichess_abc12", false, "2026-07-11");
+        assert_eq!(failed.rating, 1);
+        assert_ne!(passed.id, failed.id, "event ids must be unique");
+    }
+
+    #[test]
     fn course_progress_text_reports_mastered_and_due_lines() {
-        assert_eq!(course_progress_text(3, 2, 1), "2/3 mastered - 1 due");
-        assert_eq!(course_progress_text(3, 3, 0), "3/3 mastered");
+        assert_eq!(course_progress_text(3, 2, 1, 0), "2/3 mastered - 1 due");
+        assert_eq!(
+            course_progress_text(3, 2, 1, 1),
+            "2/3 mastered - 1 due - 1 weak"
+        );
+        assert_eq!(course_progress_text(3, 1, 0, 2), "1/3 mastered - 2 weak");
+        assert_eq!(course_progress_text(3, 3, 0, 0), "3/3 mastered");
     }
 
     #[test]

@@ -22,9 +22,11 @@ Original gap: nothing populated `puzzles` besides the starter seeds. `lichess_cl
 
 Resolution: `LichessPuzzle` now deserializes the real response shape (verified against the live API), and `lichess_client::puzzles::puzzle_fen_from_pgn` replays the game PGN through `initialPly` with shakmaty to derive the stored FEN (solver to move, `solution_uci` from the solver's side — unchanged conventions). The fetch-timing decision landed as on-demand: a "Fetch Puzzles from Lichess" button on the trainer screen pulls a batch of ~10 on a background thread (same pattern as the sync callbacks) and stores them via the existing `insert_puzzle`, with status messages for a missing `LICHESS_API_KEY` or request failures. Fixture-based tests cover deserialization and FEN derivation; no network in tests.
 
-### 2. `score_delta` doubles as the absolute puzzle rating
+### 2. `score_delta` doubles as the absolute puzzle rating — ADDRESSED 2026-07-11
 
 `get_puzzle_rating` reads the most recent `kind='puzzle'` event's `score_delta` as the current rating, so puzzle events must store the absolute updated rating (V1 does: ±10, clamped to 400–3200). Consequence: the dashboard Training Rating updates correctly, but the Recent Training Log renders the event as a delta (`+1510`). This is exactly the kind of overloading the review-event-spine plan (`docs/superpowers/plans/2026-07-07-review-event-spine.md`) should fix; puzzle events should move to normalized review events when that lands.
+
+Resolution: puzzle attempts now also write a normalized `review_events` row (target_type `puzzle`, rating 5/1 on pass/fail, source `puzzle_trainer`) via `puzzle_review_event` (`docs/superpowers/plans/2026-07-11-puzzle-review-events-and-weak-lines.md`). The `training_events` write remains only because `get_puzzle_rating` still reads its `score_delta` as the absolute rating; new consumers should read `review_events` instead, and the legacy write can be dropped once the dashboard rating migrates.
 
 ### 3. Board orientation
 
