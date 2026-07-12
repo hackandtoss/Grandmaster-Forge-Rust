@@ -148,6 +148,20 @@ CREATE TABLE IF NOT EXISTS game_sync (
     PRIMARY KEY (source, external_id)
 );
 "#,
+    r#"
+CREATE TABLE IF NOT EXISTS review_events (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    rating INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    course_id TEXT,
+    line_id TEXT,
+    move_id INTEGER,
+    created_at TEXT NOT NULL
+);
+"#,
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -279,6 +293,23 @@ pub struct CourseProgress {
     pub learned_lines: u32,
     pub mastered_lines: u32,
     pub due_lines: u32,
+}
+
+/// One normalized learning event: any reviewable target (repertoire move,
+/// puzzle, tactic, endgame, bot deviation) graded from any source, with
+/// optional course/line/move context. Shared input shape for future FSRS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewEventRecord {
+    pub id: String,
+    pub user_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub rating: i32,
+    pub source: String,
+    pub course_id: Option<String>,
+    pub line_id: Option<String>,
+    pub move_id: Option<i64>,
+    pub created_at: String,
 }
 
 pub trait TrainingStore {
@@ -1334,6 +1365,64 @@ impl SqliteStore {
         Ok(progress)
     }
 
+    pub fn insert_review_event(&mut self, event: &ReviewEventRecord) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO review_events
+                 (id, user_id, target_type, target_id, rating, source, course_id, line_id, move_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    event.id,
+                    event.user_id,
+                    event.target_type,
+                    event.target_id,
+                    event.rating,
+                    event.source,
+                    event.course_id,
+                    event.line_id,
+                    event.move_id,
+                    event.created_at
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_review_events_for_target(
+        &self,
+        target_type: &str,
+        target_id: &str,
+    ) -> Result<Vec<ReviewEventRecord>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, user_id, target_type, target_id, rating, source,
+                        course_id, line_id, move_id, created_at
+                 FROM review_events
+                 WHERE target_type = ?1 AND target_id = ?2
+                 ORDER BY created_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![target_type, target_id], |row| {
+                Ok(ReviewEventRecord {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    target_type: row.get(2)?,
+                    target_id: row.get(3)?,
+                    rating: row.get(4)?,
+                    source: row.get(5)?,
+                    course_id: row.get(6)?,
+                    line_id: row.get(7)?,
+                    move_id: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
     pub fn is_synced(&self, source: &str, external_id: &str) -> bool {
         self.conn
             .query_row(
@@ -2071,5 +2160,55 @@ mod tests {
             }
         );
         assert!(store.course_progress("missing", "2026-07-10").is_err());
+    }
+
+    #[test]
+    fn review_events_record_target_rating_and_source() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+
+        store
+            .insert_review_event(&ReviewEventRecord {
+                id: "evt1".to_string(),
+                user_id: "default_user".to_string(),
+                target_type: "repertoire_move".to_string(),
+                target_id: "42".to_string(),
+                rating: 1,
+                source: "drill".to_string(),
+                course_id: Some("vienna".to_string()),
+                line_id: Some("vienna-main".to_string()),
+                move_id: Some(42),
+                created_at: "2026-07-07".to_string(),
+            })
+            .unwrap();
+        store
+            .insert_review_event(&ReviewEventRecord {
+                id: "evt2".to_string(),
+                user_id: "default_user".to_string(),
+                target_type: "puzzle".to_string(),
+                target_id: "p1".to_string(),
+                rating: 5,
+                source: "puzzle_trainer".to_string(),
+                course_id: None,
+                line_id: None,
+                move_id: None,
+                created_at: "2026-07-08".to_string(),
+            })
+            .unwrap();
+
+        let events = store
+            .get_review_events_for_target("repertoire_move", "42")
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].rating, 1);
+        assert_eq!(events[0].source, "drill");
+        assert_eq!(events[0].course_id.as_deref(), Some("vienna"));
+        assert_eq!(events[0].line_id.as_deref(), Some("vienna-main"));
+        assert_eq!(events[0].move_id, Some(42));
+
+        let puzzle_events = store.get_review_events_for_target("puzzle", "p1").unwrap();
+        assert_eq!(puzzle_events.len(), 1);
+        assert_eq!(puzzle_events[0].course_id, None);
+        assert_eq!(puzzle_events[0].move_id, None);
     }
 }
