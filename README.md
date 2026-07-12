@@ -176,7 +176,8 @@ Planned learning upgrades:
 | `course_line_moves` | Ordered references from named lines to existing `repertoire_moves`, including required-user-move flags |
 | `opening_tree` | Master-game BFS tree nodes |
 | `puzzles` | Puzzle positions with solution and difficulty |
-| `training_events` | Log of every drill/puzzle/review outcome |
+| `training_events` | Log of every drill/puzzle/review outcome (legacy dashboard feed) |
+| `review_events` | Normalized learning events: target type/id, rating, source, optional course/line/move context — shared shape for future FSRS, tactics, and endgames |
 | `game_sync` | Per-source dedup ledger for synced game IDs (Lichess + Chess.com) |
 | `opening_lines` | *Legacy* — old repertoire lines; migrated into the tree (`repertoire_nodes`/`repertoire_moves`) on first startup, then retained as an empty legacy table (recreated empty each launch) and never written to again |
 
@@ -219,5 +220,5 @@ cargo run --release -p app
 
 ```bash
 cargo test --workspace
-# 79 tests across db_manager (incl. course metadata/status), app (srs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
+# 81 tests across db_manager (incl. course metadata/status, review events), app (srs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
 ```
