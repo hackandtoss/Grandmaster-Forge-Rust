@@ -26,7 +26,7 @@
 - Consumes: `fn side_to_move_label(fen: &str) -> &'static str` (exists at `app/src/main.rs:1584`).
 - Produces: guaranteed contract for Tasks 3–4: `side_to_move_label(fen) == "Black"` is the auto-flip condition, `"White"` for malformed/empty FEN.
 
-- [ ] **Step 1: Add the test**
+- [x] **Step 1: Add the test**
 
 Add to the `mod tests` block in `app/src/main.rs`, and add `side_to_move_label` to the `use super::{...}` list:
 
@@ -47,12 +47,12 @@ fn side_to_move_label_reads_fen_and_defaults_to_white() {
 }
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `cargo test -p app side_to_move_label_reads_fen`
 Expected: PASS (characterization of existing behavior — this pins the contract the flip relies on; if it fails, stop and re-read the helper).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add app/src/main.rs
@@ -67,7 +67,7 @@ git commit -m "test(app): pin side_to_move_label contract for board flip"
 **Interfaces:**
 - Produces: `in property <bool> flipped` on `ChessBoard`; all existing bindings keep working (default `false`).
 
-- [ ] **Step 1: Add the property and remap cell positions**
+- [x] **Step 1: Add the property and remap cell positions**
 
 In `component ChessBoard`, add below `in property <bool> interactive: true;`:
 
@@ -88,12 +88,12 @@ y: floor((root.flipped ? 63 - index : index) / 8) * root.cell-size;
 
 Everything else in the cell (background/selection check, `piece-symbol(root.pieces[index])`, `square-clicked(index)`) stays on `index` — do not touch it.
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 Run: `cargo check -p app`
 Expected: clean. (The mapping has no Rust test surface; the spec accepts `cargo check` + smoke here.)
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add app/src/main.rs
@@ -109,7 +109,7 @@ git commit -m "feat(app): view-level flipped rendering on shared ChessBoard"
 - Consumes: `ChessBoard.flipped` (Task 2), `side_to_move_label` (Task 1).
 - Produces: `in-out property <bool> puzzle-board-flipped` on AppWindow.
 
-- [ ] **Step 1: Add the AppWindow property**
+- [x] **Step 1: Add the AppWindow property**
 
 Next to the other puzzle properties (`puzzle-fetch-status` etc.):
 
@@ -117,7 +117,7 @@ Next to the other puzzle properties (`puzzle-fetch-status` etc.):
 in-out property <bool> puzzle-board-flipped: false;
 ```
 
-- [ ] **Step 2: Bind the board and add the toggle**
+- [x] **Step 2: Bind the board and add the toggle**
 
 The puzzle screen's `ChessBoard` (~line 1326) becomes:
 
@@ -139,7 +139,7 @@ Button {
 }
 ```
 
-- [ ] **Step 3: Auto-flip on load**
+- [x] **Step 3: Auto-flip on load**
 
 In `on_load_puzzle`'s success path, right after `app.set_puzzle_selected_square(-1);`:
 
@@ -147,12 +147,12 @@ In `on_load_puzzle`'s success path, right after `app.set_puzzle_selected_square(
 app.set_puzzle_board_flipped(side_to_move_label(&puzzle.fen) == "Black");
 ```
 
-- [ ] **Step 4: Build and test**
+- [x] **Step 4: Build and test**
 
 Run: `cargo check -p app && cargo test -p app`
 Expected: clean build, 41 tests pass (40 + Task 1's).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/src/main.rs
@@ -168,7 +168,7 @@ git commit -m "feat(app): auto-flip + manual flip toggle on Puzzle Trainer"
 - Consumes: `ChessBoard.flipped` (Task 2).
 - Produces: `in-out property <bool> play-board-flipped` on AppWindow.
 
-- [ ] **Step 1: Add the AppWindow property**
+- [x] **Step 1: Add the AppWindow property**
 
 Next to the other play properties:
 
@@ -176,7 +176,7 @@ Next to the other play properties:
 in-out property <bool> play-board-flipped: false;
 ```
 
-- [ ] **Step 2: Bind the board and add the toggle**
+- [x] **Step 2: Bind the board and add the toggle**
 
 The play screen's `ChessBoard` (~line 1273) becomes:
 
@@ -198,7 +198,7 @@ Button {
 }
 ```
 
-- [ ] **Step 3: Auto-flip on new game**
+- [x] **Step 3: Auto-flip on new game**
 
 In `on_play_new_game`, right after `app.set_play_active(true);`:
 
@@ -206,12 +206,12 @@ In `on_play_new_game`, right after `app.set_play_active(true);`:
 app.set_play_board_flipped(st.play_side == "Black");
 ```
 
-- [ ] **Step 4: Full verification**
+- [x] **Step 4: Full verification**
 
 Run: `cargo fmt --all && cargo fmt --all -- --check && cargo clippy --workspace && cargo test --workspace`
 Expected: fmt clean, zero clippy warnings, 84 tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/src/main.rs
@@ -224,7 +224,7 @@ git commit -m "feat(app): auto-flip + manual flip toggle on Play vs Bot"
 - Modify: `README.md`
 - Modify: `docs/superpowers/specs/2026-07-10-puzzle-trainer-v1-notes.md` (gap 3, board orientation)
 
-- [ ] **Step 1: README**
+- [x] **Step 1: README**
 
 In the Puzzle Training section add a bullet:
 
@@ -234,11 +234,11 @@ In the Puzzle Training section add a bullet:
 
 Update the test-count line from `# 83 tests` to `# 84 tests` (same wording otherwise).
 
-- [ ] **Step 2: Mark the notes-doc gap addressed**
+- [x] **Step 2: Mark the notes-doc gap addressed**
 
 Retitle gap 3 heading with ` — ADDRESSED 2026-07-11` and append one resolution sentence pointing at `docs/superpowers/specs/2026-07-11-board-flip-design.md`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-07-10-puzzle-trainer-v1-notes.md
