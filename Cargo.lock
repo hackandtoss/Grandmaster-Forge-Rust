@@ -203,12 +203,14 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "chesscom_client",
+ "chrono",
  "db_manager",
  "dotenvy",
  "engine_controller",
  "lichess_client",
  "mastery_ui",
  "pgn_processor",
+ "rs-fsrs",
  "rusqlite",
  "shakmaty",
  "slint",
@@ -682,6 +684,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link 0.2.1",
 ]
@@ -3810,6 +3813,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "rs-fsrs"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65a7e7d53c16e720833aa109509f46d4d6cc0c4c820f95b865df72c6118e9124"
+dependencies = [
+ "chrono",
 ]
 
 [[package]]

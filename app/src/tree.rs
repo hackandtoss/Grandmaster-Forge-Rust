@@ -240,43 +240,26 @@ pub fn import_pgn_as_course_lines(
     Ok((new_edges, named_lines))
 }
 
-/// Apply an SM-2 grade to a single repertoire edge and persist the new schedule.
-/// `today_days` is epoch-days; the next due date is `today + max(interval, 1)` days.
-pub fn grade_edge(
-    db: &mut SqliteStore,
-    edge: &db_manager::RepertoireMoveRecord,
-    grade: u32,
-    today_days: u64,
-) -> Result<(), String> {
-    let card = crate::srs::SrsCard {
-        interval: edge.srs_interval,
-        ease_factor: edge.srs_ease,
-        repetitions: edge.srs_reps,
-    };
-    let next = crate::srs::review(&card, grade);
-    let (y, m, d) = days_to_ymd(today_days + next.interval.max(1.0) as u64);
-    db.update_repertoire_move_srs(
-        edge.id,
-        next.interval,
-        next.ease_factor,
-        next.repetitions,
-        &format!("{:04}-{:02}-{:02}", y, m, d),
-    )
-}
-
-/// Grade an edge (SM-2, same as [`grade_edge`]) and record a normalized
-/// review event for it. `source` says what produced the grade ("drill",
-/// "bot_deviation", ...). Review events are the shared learning-event shape
-/// that future FSRS/tactics/endgame work reads; `training_events` stays the
-/// legacy dashboard feed.
+/// Grade an edge via FSRS and record a normalized review event for it.
+/// `source` says what produced the grade ("drill", "bot_deviation", ...).
+/// Review events are the shared learning-event shape FSRS's future per-user
+/// optimizer reads; `training_events` stays the legacy dashboard feed.
 pub fn grade_edge_with_event(
     db: &mut SqliteStore,
     edge: &db_manager::RepertoireMoveRecord,
-    grade: u32,
+    rating: crate::fsrs::Rating,
     today_days: u64,
     source: &str,
 ) -> Result<(), String> {
-    grade_edge(db, edge, grade, today_days)?;
+    let schedule = crate::fsrs::next_schedule(edge, rating, today_days);
+    db.update_repertoire_move_fsrs(
+        edge.id,
+        schedule.stability,
+        schedule.difficulty,
+        &schedule.last_review,
+        schedule.reps,
+        &schedule.due_date,
+    )?;
     let (y, m, d) = days_to_ymd(today_days);
     let created_at = format!("{:04}-{:02}-{:02}", y, m, d);
     // Nanos plus a process-local sequence keep ids unique even when the same
@@ -292,7 +275,7 @@ pub fn grade_edge_with_event(
         user_id: "default_user".to_string(),
         target_type: "repertoire_move".to_string(),
         target_id: edge.id.to_string(),
-        rating: grade.min(5) as i32,
+        rating: rating as i32,
         source: source.to_string(),
         course_id: None,
         line_id: None,
@@ -671,48 +654,46 @@ mod tests {
     }
 
     #[test]
-    fn grade_edge_pass_and_fail() {
+    fn grading_schedules_via_fsrs_and_records_events() {
         let mut db = mem_store();
         let (id, _, _) = add_move_edge(&mut db, START, "e2e4", "White", "manual").unwrap();
         let edge = db.get_repertoire_move(id).unwrap().unwrap();
-        // 2026-07-01 is day 20635 since epoch
-        grade_edge(&mut db, &edge, 5, 20635).unwrap();
+
+        // 2026-07-01 is day 20635 since epoch. First success schedules out.
+        grade_edge_with_event(&mut db, &edge, crate::fsrs::Rating::Good, 20635, "drill").unwrap();
         let after = db.get_repertoire_move(id).unwrap().unwrap();
         assert_eq!(after.srs_reps, 1);
-        assert_eq!(after.srs_due_date, "2026-07-02"); // interval 1 day
-        grade_edge(&mut db, &after, 1, 20635).unwrap();
+        assert!(after.fsrs_stability.is_some());
+        assert!(after.srs_due_date.as_str() > "2026-07-01");
+        assert_eq!(after.fsrs_last_review.as_deref(), Some("2026-07-01"));
+
+        // Failure resets reps and comes back soon.
+        grade_edge_with_event(&mut db, &after, crate::fsrs::Rating::Again, 20640, "drill").unwrap();
         let failed = db.get_repertoire_move(id).unwrap().unwrap();
         assert_eq!(failed.srs_reps, 0);
-        assert_eq!(failed.srs_due_date, "2026-07-02"); // reset to 1 day
-    }
+        assert!(failed.srs_due_date.as_str() > "2026-07-06");
+        assert!(failed.srs_due_date.as_str() <= "2026-07-13");
 
-    #[test]
-    fn grade_edge_records_review_event() {
-        let mut db = mem_store();
-        let (id, _, _) = add_move_edge(&mut db, START, "e2e4", "White", "manual").unwrap();
-        let edge = db.get_repertoire_move(id).unwrap().unwrap();
-
-        // 2026-07-01 is day 20635 since epoch
-        grade_edge_with_event(&mut db, &edge, 1, 20635, "drill").unwrap();
-
-        // The SM-2 schedule still advances exactly as with plain grade_edge.
-        let after = db.get_repertoire_move(id).unwrap().unwrap();
-        assert_eq!(after.srs_due_date, "2026-07-02");
-
-        let events = db
-            .get_review_events_for_target("repertoire_move", &id.to_string())
-            .unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].rating, 1);
-        assert_eq!(events[0].source, "drill");
-        assert_eq!(events[0].move_id, Some(id));
-        assert_eq!(events[0].created_at, "2026-07-01");
-
-        grade_edge_with_event(&mut db, &after, 5, 20635, "bot_deviation").unwrap();
+        // Events carry the FSRS rating values.
         let events = db
             .get_review_events_for_target("repertoire_move", &id.to_string())
             .unwrap();
         assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|e| e.rating == 3));
+        assert!(events.iter().any(|e| e.rating == 1 && e.source == "drill"));
+
+        grade_edge_with_event(
+            &mut db,
+            &failed,
+            crate::fsrs::Rating::Again,
+            20640,
+            "bot_deviation",
+        )
+        .unwrap();
+        let events = db
+            .get_review_events_for_target("repertoire_move", &id.to_string())
+            .unwrap();
+        assert_eq!(events.len(), 3);
         assert!(events.iter().any(|e| e.source == "bot_deviation"));
     }
 
