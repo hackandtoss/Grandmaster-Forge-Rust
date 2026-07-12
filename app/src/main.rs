@@ -453,6 +453,7 @@ slint::slint! {
         in-out property <bool> puzzle-active: false;
         in-out property <string> puzzle-fetch-status: "";
         in-out property <bool> puzzle-board-flipped: false;
+        in-out property <bool> play-board-flipped: false;
 
         // Callbacks
         callback select-screen(string);
@@ -1279,6 +1280,7 @@ slint::slint! {
                     ChessBoard {
                         pieces: root.play-board-pieces;
                         selected-square: root.play-selected-square;
+                        flipped: root.play-board-flipped;
                         square-clicked(index) => { root.play-click-square(index); }
                     }
                     // Controls
@@ -1310,6 +1312,10 @@ slint::slint! {
                         Button {
                             text: "New Game";
                             clicked => { root.play-new-game(root.play-color, elo-input.text.to-float()); }
+                        }
+                        Button {
+                            text: "Flip Board";
+                            clicked => { root.play-board-flipped = !root.play-board-flipped; }
                         }
                         if (root.play-active) : Button {
                             text: "Resign";
@@ -3487,6 +3493,7 @@ fn main() {
             st.play_left_book_at = None;
             app.set_play_elo(elo);
             app.set_play_active(true);
+            app.set_play_board_flipped(st.play_side == "Black");
             app.set_play_summary(slint::SharedString::from(""));
             app.set_play_board_pieces(slint::ModelRc::from(Rc::new(slint::VecModel::from(
                 fen_to_pieces("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"),
