@@ -2398,7 +2398,7 @@ fn main() {
                 .cloned();
 
             if let Some(edge) = matched {
-                let _ = tree::grade_edge(&mut state.db, &edge, 5, today_days);
+                let _ = tree::grade_edge_with_event(&mut state.db, &edge, 5, today_days, "drill");
                 let event = TrainingEventRecord {
                     id: format!("evt_{}", uuid_now()),
                     user_id: "default_user".to_string(),
@@ -2430,7 +2430,8 @@ fn main() {
             } else {
                 // Wrong move: fail every expected edge at this node (they were all "the answer")
                 for edge in state.drill_expected.clone() {
-                    let _ = tree::grade_edge(&mut state.db, &edge, 1, today_days);
+                    let _ =
+                        tree::grade_edge_with_event(&mut state.db, &edge, 1, today_days, "drill");
                 }
                 let event = TrainingEventRecord {
                     id: format!("evt_{}", uuid_now()),
@@ -3528,7 +3529,13 @@ fn main() {
                         / 86400;
                     let expected: Vec<String> = my_edges.iter().map(|e| e.san.clone()).collect();
                     for e in &my_edges {
-                        let _ = tree::grade_edge(&mut st.db, e, 1, today_days);
+                        let _ = tree::grade_edge_with_event(
+                            &mut st.db,
+                            e,
+                            1,
+                            today_days,
+                            "bot_deviation",
+                        );
                     }
                     let move_no = st.play_moves_uci.len() / 2 + 1;
                     st.play_deviations.push(format!(
