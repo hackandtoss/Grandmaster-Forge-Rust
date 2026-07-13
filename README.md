@@ -61,6 +61,8 @@ Near-term direction: add a tactical scrutinizer on top of the existing game-revi
 - Resign or reach game-over to get a summary (plies in book, where you left book, deviations due for review — scheduled by FSRS); "Review This Game" hands the game to Game Review for full engine analysis
 
 ### Game Review
+- "Analyze Game" button runs (or re-runs) engine analysis for any stored game — including synced Lichess/Chess.com games, which previously had no analysis path
+- The Review screen shows live analysis status and an explicit warning when only the bundled mock engine is available (no real Stockfish found): evaluations are placeholders until `STOCKFISH_PATH` points at a real engine
 - Import PGN; Stockfish analyses every position in a background thread
 - Centipawn loss per ply, mistake classification (Inaccuracy / Mistake / Blunder)
 - Move timeline with board visualization
@@ -222,5 +224,5 @@ cargo run --release -p app
 
 ```bash
 cargo test --workspace
-# 87 tests across db_manager (incl. course metadata/status, review events, Weak lines, FSRS migration), app (fsrs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
+# 89 tests across db_manager (incl. course metadata/status, review events, Weak lines, FSRS migration), app (fsrs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
 ```
