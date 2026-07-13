@@ -623,11 +623,24 @@ impl SqliteStore {
     }
 
     pub fn get_next_puzzle(&self, max_difficulty: i32) -> Result<Option<PuzzleRecord>, String> {
+        self.get_next_puzzle_filtered(0, max_difficulty, None)
+    }
+
+    /// Random puzzle within a difficulty band, optionally restricted to one
+    /// theme. Themes are stored comma-joined; matching is whole-token (the
+    /// list is wrapped in commas so "mate" cannot match inside "mateIn1").
+    pub fn get_next_puzzle_filtered(
+        &self,
+        min_difficulty: i32,
+        max_difficulty: i32,
+        theme: Option<&str>,
+    ) -> Result<Option<PuzzleRecord>, String> {
         let result = self.conn.query_row(
             "SELECT id, fen, solution_uci, theme, difficulty FROM puzzles
-             WHERE difficulty <= ?1
+             WHERE difficulty BETWEEN ?1 AND ?2
+               AND (?3 IS NULL OR ',' || theme || ',' LIKE '%,' || ?3 || ',%')
              ORDER BY RANDOM() LIMIT 1",
-            rusqlite::params![max_difficulty],
+            rusqlite::params![min_difficulty, max_difficulty, theme],
             |row| {
                 Ok(PuzzleRecord {
                     id: row.get(0)?,
@@ -643,6 +656,27 @@ impl SqliteStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// Distinct theme tokens across all stored puzzles, sorted.
+    pub fn get_puzzle_themes(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT theme FROM puzzles")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut tokens = std::collections::BTreeSet::new();
+        for themes in rows {
+            for token in themes.map_err(|e| e.to_string())?.split(',') {
+                let token = token.trim();
+                if !token.is_empty() {
+                    tokens.insert(token.to_string());
+                }
+            }
+        }
+        Ok(tokens.into_iter().collect())
     }
 
     pub fn insert_opening_node(&mut self, node: &OpeningNode) -> Result<(), String> {
@@ -2614,6 +2648,56 @@ mod tests {
         assert_eq!(puzzle_events.len(), 1);
         assert_eq!(puzzle_events[0].course_id, None);
         assert_eq!(puzzle_events[0].move_id, None);
+    }
+
+    #[test]
+    fn filtered_puzzle_selection_respects_band_and_theme() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+        for (id, diff, theme) in [
+            ("p1", 900, "mate,mateIn1"),
+            ("p2", 1500, "fork,endgame"),
+            ("p3", 2500, "endgame"),
+        ] {
+            store
+                .insert_puzzle(&PuzzleRecord {
+                    id: id.to_string(),
+                    fen: "8/8/8/8/8/8/8/8 w - - 0 1".to_string(),
+                    solution_uci: "e2e4".to_string(),
+                    theme: theme.to_string(),
+                    difficulty: diff,
+                })
+                .unwrap();
+        }
+
+        let p = store
+            .get_next_puzzle_filtered(400, 1200, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.id, "p1");
+        let p = store
+            .get_next_puzzle_filtered(400, 3200, Some("fork"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.id, "p2");
+        // Whole-token matching: "mateIn" is a prefix of a theme, not a theme.
+        assert!(store
+            .get_next_puzzle_filtered(400, 3200, Some("mateIn"))
+            .unwrap()
+            .is_none());
+        assert!(store
+            .get_next_puzzle_filtered(400, 3200, Some("mateIn1"))
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_next_puzzle_filtered(400, 800, Some("endgame"))
+            .unwrap()
+            .is_none());
+
+        assert_eq!(
+            store.get_puzzle_themes().unwrap(),
+            vec!["endgame", "fork", "mate", "mateIn1"]
+        );
     }
 
     #[test]

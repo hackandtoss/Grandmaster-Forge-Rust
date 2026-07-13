@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 slint::slint! {
-    import { Button, ScrollView, LineEdit, TextEdit } from "std-widgets.slint";
+    import { Button, ComboBox, ScrollView, LineEdit, TextEdit } from "std-widgets.slint";
 
     struct GameEntry {
         id: string,
@@ -454,6 +454,9 @@ slint::slint! {
         in-out property <bool> puzzle-active: false;
         in-out property <string> puzzle-fetch-status: "";
         in-out property <bool> puzzle-board-flipped: false;
+        in-out property <string> puzzle-level: "Adaptive";
+        in-out property <string> puzzle-theme: "Any";
+        in-out property <[string]> puzzle-theme-options: ["Any"];
         in-out property <bool> play-board-flipped: false;
 
         // Callbacks
@@ -1355,6 +1358,18 @@ slint::slint! {
                     VerticalLayout {
                         spacing: 12px; alignment: start;
                         Text { text: "Puzzle Trainer"; color: #ffffff; font-size: 18px; font-weight: 700; }
+                        Text { text: "Level / Theme"; color: #a1a1aa; font-size: 12px; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            ComboBox {
+                                model: ["Adaptive", "Easy", "Medium", "Hard", "Expert", "Any"];
+                                current-value <=> root.puzzle-level;
+                            }
+                            ComboBox {
+                                model: root.puzzle-theme-options;
+                                current-value <=> root.puzzle-theme;
+                            }
+                        }
                         Button {
                             text: root.puzzle-active ? "Skip / New Puzzle" : "New Puzzle";
                             clicked => { root.load-puzzle(); }
@@ -1692,6 +1707,20 @@ fn lichess_puzzle_to_record(
 
 /// "Move X of Y" counting only the solver's moves (even indices of the
 /// solution line); `index` is the next expected solution index.
+/// Difficulty window for the next puzzle. "Adaptive" tracks the user's
+/// puzzle rating (-150/+200, clamped to the stored 400..=3200 range); named
+/// bands are fixed; anything else falls back to the full range.
+fn puzzle_difficulty_window(user_rating: i32, level: &str) -> (i32, i32) {
+    match level {
+        "Adaptive" => ((user_rating - 150).max(400), (user_rating + 200).min(3200)),
+        "Easy" => (400, 1200),
+        "Medium" => (1200, 1800),
+        "Hard" => (1800, 2400),
+        "Expert" => (2400, 3200),
+        _ => (400, 3200),
+    }
+}
+
 fn puzzle_progress_text(index: usize, total: usize) -> String {
     format!("Move {} of {}", index / 2 + 1, total.div_ceil(2))
 }
@@ -2032,6 +2061,20 @@ fn main() {
                 .collect();
             app.set_games(slint::ModelRc::from(Rc::new(slint::VecModel::from(
                 game_entries,
+            ))));
+
+            // Refresh the puzzle theme picker from stored puzzles.
+            let mut theme_options = vec![slint::SharedString::from("Any")];
+            theme_options.extend(
+                state
+                    .db
+                    .get_puzzle_themes()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(slint::SharedString::from),
+            );
+            app.set_puzzle_theme_options(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                theme_options,
             ))));
 
             // Refresh real course cards and selected course detail.
@@ -2775,7 +2818,18 @@ fn main() {
         app.on_load_puzzle(move || {
             let mut st = state.lock().unwrap();
             let app = app_weak.upgrade().unwrap();
-            match st.db.get_next_puzzle(2000) {
+            let rating = st.db.get_puzzle_rating("default_user").unwrap_or(1500);
+            let (min_difficulty, max_difficulty) =
+                puzzle_difficulty_window(rating, app.get_puzzle_level().as_str());
+            let theme_choice = app.get_puzzle_theme().to_string();
+            let theme = match theme_choice.as_str() {
+                "" | "Any" => None,
+                chosen => Some(chosen),
+            };
+            match st
+                .db
+                .get_next_puzzle_filtered(min_difficulty, max_difficulty, theme)
+            {
                 Ok(Some(puzzle)) => {
                     let pos = puzzle
                         .fen
@@ -2828,7 +2882,7 @@ fn main() {
                     st.puzzle_current = Some(puzzle);
                 }
                 Ok(None) => app.set_puzzle_status(slint::SharedString::from(
-                    "No puzzles stored yet — starter puzzles are seeded on launch.",
+                    "No puzzles match the current level/theme — relax the filters or fetch more from Lichess.",
                 )),
                 Err(e) => app.set_puzzle_status(slint::SharedString::from(format!(
                     "Failed to load a puzzle: {e}"
@@ -4346,8 +4400,9 @@ mod tests {
     use super::{
         accuracy_summary_text, analysis_complete_text, bot_game_outcome, build_bot_game_pgn,
         course_progress_text, engine_notice, fen_to_pieces, game_review_summary,
-        lichess_puzzle_to_record, puzzle_progress_text, puzzle_review_event, review_stat_entries,
-        side_to_move_label, sk_fen, solution_to_san, starter_puzzles, updated_puzzle_rating,
+        lichess_puzzle_to_record, puzzle_difficulty_window, puzzle_progress_text,
+        puzzle_review_event, review_stat_entries, side_to_move_label, sk_fen, solution_to_san,
+        starter_puzzles, updated_puzzle_rating,
     };
     use shakmaty::uci::Uci;
     use shakmaty::{CastlingMode, Chess, Position};
@@ -4477,6 +4532,19 @@ mod tests {
             accuracy_summary_text(None),
             "Accuracy pending | Est. Elo pending"
         );
+    }
+
+    #[test]
+    fn puzzle_difficulty_window_bands_and_adaptive() {
+        assert_eq!(puzzle_difficulty_window(1500, "Adaptive"), (1350, 1700));
+        assert_eq!(puzzle_difficulty_window(450, "Adaptive"), (400, 650));
+        assert_eq!(puzzle_difficulty_window(3150, "Adaptive"), (3000, 3200));
+        assert_eq!(puzzle_difficulty_window(1500, "Easy"), (400, 1200));
+        assert_eq!(puzzle_difficulty_window(1500, "Medium"), (1200, 1800));
+        assert_eq!(puzzle_difficulty_window(1500, "Hard"), (1800, 2400));
+        assert_eq!(puzzle_difficulty_window(1500, "Expert"), (2400, 3200));
+        assert_eq!(puzzle_difficulty_window(1500, "Any"), (400, 3200));
+        assert_eq!(puzzle_difficulty_window(1500, "unknown"), (400, 3200));
     }
 
     #[test]

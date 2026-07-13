@@ -106,7 +106,8 @@ Near-term direction: add a tactical scrutinizer on top of the existing game-revi
 
 ### Puzzle Training
 - Dedicated Puzzle Trainer screen: random puzzle on the interactive board, two-click move entry, per-move feedback against the stored solution line, and a "Show Solution" reveal (rendered as SAN)
-- Puzzles stored in DB with FEN, solution UCI line, theme, and difficulty; `load-puzzle` picks a random puzzle up to a difficulty ceiling
+- Puzzles stored in DB with FEN, solution UCI line, theme, and difficulty; `load-puzzle` picks a random puzzle from the selected level and theme
+- Level picker (Adaptive default — tracks your puzzle rating -150/+200 — plus Easy/Medium/Hard/Expert/Any bands) and a theme picker populated from stored puzzle themes, Lichess-style
 - "Fetch Puzzles from Lichess" pulls a small batch (~10) from `/api/puzzle/next` on a background thread; the API returns the game PGN plus `initialPly` (no FEN), so each puzzle's FEN is derived by replaying the PGN with shakmaty — themes are comma-joined and the Lichess rating maps to difficulty (requires `LICHESS_API_KEY`)
 - Five built-in starter mate puzzles are seeded idempotently on launch so the trainer works before the first Lichess fetch
 - Board auto-flips so the solver's side is at the bottom (Black-to-move puzzles render Black-down); Play vs Bot flips when you play Black — both screens have a manual "Flip Board" toggle
@@ -224,5 +225,5 @@ cargo run --release -p app
 
 ```bash
 cargo test --workspace
-# 89 tests across db_manager (incl. course metadata/status, review events, Weak lines, FSRS migration), app (fsrs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
+# 91 tests across db_manager (incl. course metadata/status, review events, Weak lines, FSRS migration), app (fsrs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
 ```
