@@ -23,6 +23,7 @@ Near-term direction: add a tactical scrutinizer on top of the existing game-revi
 
 ### Opening Courses & Repertoire Builder
 - Browse real course cards backed by `courses`, with progress derived from child named-line statuses
+- Repertoires that predate course metadata are backfilled once at startup: every root-to-leaf path with a user move becomes a named line in the side's Uncategorized course (idempotent; skipped for sides that already have course lines)
 - Open a course to see its chapters and named lines marked `Undiscovered`, `Learning`, `Learned`, `Mastered`, `Review Due`, or `Weak` (repeated recent failures or a bot-play deviation on a required move)
 - Interactive 8×8 builder with two-click move entry, undo, reset, and White/Black selection
 - Name and save lines into a selected course/chapter; an `Uncategorized <side> Repertoire / Main` chapter is created on demand when no target is chosen
@@ -221,5 +222,5 @@ cargo run --release -p app
 
 ```bash
 cargo test --workspace
-# 85 tests across db_manager (incl. course metadata/status, review events, Weak lines, FSRS migration), app (fsrs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
+# 87 tests across db_manager (incl. course metadata/status, review events, Weak lines, FSRS migration), app (fsrs, accuracy, weakness, tree, puzzles), engine_controller, lichess_client (incl. puzzle FEN derivation), chesscom_client, pgn_processor
 ```
