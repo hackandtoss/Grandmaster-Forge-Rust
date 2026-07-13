@@ -357,6 +357,7 @@ slint::slint! {
         in-out property <string> selected-move-best: "";
         in-out property <string> selected-game-summary: "Import or select a game to review.";
         in-out property <string> review-status: "";
+        in-out property <string> engine-notice: "";
         in-out property <bool> show-game-review-brief: false;
         in-out property <string> game-review-game-id: "";
         in-out property <string> game-review-result-text: "";
@@ -486,6 +487,7 @@ slint::slint! {
         callback play-click-square(int);
         callback play-resign();
         callback play-review-game();
+        callback analyze-selected-game();
 
         // Puzzle trainer callbacks (load-puzzle above loads a random puzzle)
         callback puzzle-click-square(int);
@@ -1026,6 +1028,14 @@ slint::slint! {
                                 height: 20px;
                                 overflow: elide;
                             }
+
+                            Button {
+                                text: "Analyze Game";
+                                enabled: root.selected-game-id != "";
+                                clicked => { root.analyze-selected-game(); }
+                            }
+                            Text { text: root.review-status; color: #a78bfa; font-size: 12px; wrap: word-wrap; }
+                            if (root.engine-notice != "") : Text { text: root.engine-notice; color: #f59e0b; font-size: 12px; wrap: word-wrap; }
 
                             Rectangle {
                                 background: #1a1a1e;
@@ -1948,6 +1958,9 @@ fn main() {
 
     let app = AppWindow::new().expect("failed to create Slint window");
     let app_weak = app.as_weak();
+    if let Some(notice) = engine_notice(&state.lock().unwrap().stockfish_path) {
+        app.set_engine_notice(slint::SharedString::from(notice));
+    }
 
     // Setup initial data refresh helper
     let refresh_data = {
@@ -2166,6 +2179,40 @@ fn main() {
             ))));
             app.set_selected_course_id(course_id);
             refresh();
+        });
+    }
+
+    // On-demand engine analysis for the selected (e.g. synced) game.
+    {
+        let state = state.clone();
+        let app_weak = app_weak.clone();
+        let refresh_data_cp = refresh_data.clone();
+        app.on_analyze_selected_game(move || {
+            let app = app_weak.upgrade().unwrap();
+            let game_id = app.get_selected_game_id().to_string();
+            if game_id.is_empty() {
+                return;
+            }
+            let (white, black) = {
+                let st = state.lock().unwrap();
+                st.db
+                    .conn
+                    .query_row(
+                        "SELECT white, black FROM games WHERE id = ?1",
+                        [game_id.as_str()],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .unwrap_or_default()
+            };
+            app.set_review_status(slint::SharedString::from("Analyzing with Stockfish..."));
+            analyze_game_in_background(
+                &state,
+                &app_weak,
+                &refresh_data_cp,
+                &game_id,
+                &white,
+                &black,
+            );
         });
     }
 
@@ -3838,64 +3885,25 @@ fn finish_play_game(state: &mut AppState, app: &AppWindow, reason: &str) -> Opti
 /// Review screen immediately (manual "Import & Analyze Game" / "Review This
 /// Game" clicks) or stays put (auto-triggered right after a bot game, where
 /// the Game Review Brief overlay is shown instead — see Task 5).
-fn import_and_analyze_pgn(
+/// Analyze every stored position of `game_id` on a background thread with the
+/// configured engine, writing centipawn loss and move class back per position,
+/// then game accuracy, the mistake tree, and finally the review status/Brief.
+/// `white`/`black` decide whose mistakes feed the mistake tree.
+fn analyze_game_in_background(
     state: &Arc<Mutex<AppState>>,
     app_weak: &slint::Weak<AppWindow>,
     refresh_data_cp: &Arc<impl Fn() + Send + Sync + 'static>,
-    pgn_text: &str,
-    switch_to_review: bool,
+    game_id: &str,
+    white: &str,
+    black: &str,
 ) {
-    if pgn_text.trim().is_empty() {
-        return;
-    }
-
-    let mut state_lock = state.lock().unwrap();
-    let parsed = pgn_processor::parse_pgn(pgn_text);
-
-    let white = parsed
-        .headers
-        .get("White")
-        .cloned()
-        .unwrap_or_else(|| "WhitePlayer".to_string());
-    let black = parsed
-        .headers
-        .get("Black")
-        .cloned()
-        .unwrap_or_else(|| "BlackPlayer".to_string());
-    let date = parsed
-        .headers
-        .get("Date")
-        .cloned()
-        .unwrap_or_else(|| "2026-06-12".to_string());
-    let round = parsed
-        .headers
-        .get("Round")
-        .filter(|r| !r.is_empty() && *r != "?" && *r != "-");
-    let game_id = match round {
-        Some(r) => format!("{}_{}_{}_{}", white, black, date, r).replace(" ", "_"),
-        None => format!("{}_{}_{}", white, black, date).replace(" ", "_"),
-    };
-
-    if let Err(e) = ingest_pgn_game(
-        &mut state_lock.db,
-        &game_id,
-        "Imported PGN",
-        pgn_text,
-        Some(date),
-    ) {
-        drop(state_lock);
-        if let Some(app) = app_weak.upgrade() {
-            app.set_review_status(slint::SharedString::from(format!("Import failed: {e}")));
-        }
-        return;
-    }
-
-    // Trigger background thread to analyze and evaluate this game!
-    let sf_path = state_lock.stockfish_path.clone();
+    let sf_path = state.lock().unwrap().stockfish_path.clone();
     let state_thread = state.clone();
     let refresh_thread = refresh_data_cp.clone();
-    let game_id_thread = game_id.clone();
+    let game_id_thread = game_id.to_string();
     let app_weak_thread = app_weak.clone();
+    let white = white.to_string();
+    let black = black.to_string();
 
     thread::spawn(move || {
         let mut sf = match StockfishEngine::new(&sf_path) {
@@ -4152,6 +4160,7 @@ fn import_and_analyze_pgn(
         };
         let accuracy_text = accuracy_summary_text(accuracy);
 
+        let classified_count = class_names.len();
         // Trigger UI refresh
         let _ = slint::invoke_from_event_loop(move || {
             refresh_thread();
@@ -4177,12 +4186,92 @@ fn import_and_analyze_pgn(
                     )));
                     app.set_game_review_accuracy_text(slint::SharedString::from(accuracy_text));
                 }
+                app.set_review_status(slint::SharedString::from(analysis_complete_text(
+                    classified_count,
+                    engine_notice(&sf_path).as_deref(),
+                )));
             }
         });
     });
+}
+
+/// Warning to surface whenever evaluations come from the bundled mock engine
+/// (a dev/test binary with canned output) instead of a real Stockfish.
+fn engine_notice(engine_path: &str) -> Option<String> {
+    if engine_path.contains("mock-stockfish") {
+        Some(
+            "No real Stockfish found — evaluations are placeholders. \
+             Install Stockfish or set STOCKFISH_PATH in .env, then restart."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+fn analysis_complete_text(classified: usize, notice: Option<&str>) -> String {
+    match notice {
+        Some(notice) => format!("Analysis complete: {classified} moves classified. {notice}"),
+        None => format!("Analysis complete: {classified} moves classified."),
+    }
+}
+
+fn import_and_analyze_pgn(
+    state: &Arc<Mutex<AppState>>,
+    app_weak: &slint::Weak<AppWindow>,
+    refresh_data_cp: &Arc<impl Fn() + Send + Sync + 'static>,
+    pgn_text: &str,
+    switch_to_review: bool,
+) {
+    if pgn_text.trim().is_empty() {
+        return;
+    }
+
+    let mut state_lock = state.lock().unwrap();
+    let parsed = pgn_processor::parse_pgn(pgn_text);
+
+    let white = parsed
+        .headers
+        .get("White")
+        .cloned()
+        .unwrap_or_else(|| "WhitePlayer".to_string());
+    let black = parsed
+        .headers
+        .get("Black")
+        .cloned()
+        .unwrap_or_else(|| "BlackPlayer".to_string());
+    let date = parsed
+        .headers
+        .get("Date")
+        .cloned()
+        .unwrap_or_else(|| "2026-06-12".to_string());
+    let round = parsed
+        .headers
+        .get("Round")
+        .filter(|r| !r.is_empty() && *r != "?" && *r != "-");
+    let game_id = match round {
+        Some(r) => format!("{}_{}_{}_{}", white, black, date, r).replace(" ", "_"),
+        None => format!("{}_{}_{}", white, black, date).replace(" ", "_"),
+    };
+
+    if let Err(e) = ingest_pgn_game(
+        &mut state_lock.db,
+        &game_id,
+        "Imported PGN",
+        pgn_text,
+        Some(date),
+    ) {
+        drop(state_lock);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_review_status(slint::SharedString::from(format!("Import failed: {e}")));
+        }
+        return;
+    }
+
+    drop(state_lock);
+    analyze_game_in_background(state, app_weak, refresh_data_cp, &game_id, &white, &black);
 
     // Local updates
-    drop(state_lock);
     refresh_data_cp();
     if let Some(app) = app_weak.upgrade() {
         if switch_to_review {
@@ -4255,10 +4344,10 @@ fn drill_advance(state: &mut AppState, app: &AppWindow) {
 #[cfg(test)]
 mod tests {
     use super::{
-        accuracy_summary_text, bot_game_outcome, build_bot_game_pgn, course_progress_text,
-        fen_to_pieces, game_review_summary, lichess_puzzle_to_record, puzzle_progress_text,
-        puzzle_review_event, review_stat_entries, side_to_move_label, sk_fen, solution_to_san,
-        starter_puzzles, updated_puzzle_rating,
+        accuracy_summary_text, analysis_complete_text, bot_game_outcome, build_bot_game_pgn,
+        course_progress_text, engine_notice, fen_to_pieces, game_review_summary,
+        lichess_puzzle_to_record, puzzle_progress_text, puzzle_review_event, review_stat_entries,
+        side_to_move_label, sk_fen, solution_to_san, starter_puzzles, updated_puzzle_rating,
     };
     use shakmaty::uci::Uci;
     use shakmaty::{CastlingMode, Chess, Position};
@@ -4387,6 +4476,27 @@ mod tests {
         assert_eq!(
             accuracy_summary_text(None),
             "Accuracy pending | Est. Elo pending"
+        );
+    }
+
+    #[test]
+    fn engine_notice_flags_only_the_mock_engine() {
+        let mock = engine_notice("C:/repo/target/debug/mock-stockfish.exe");
+        assert!(mock.is_some());
+        assert!(mock.unwrap().contains("placeholder"));
+        assert_eq!(engine_notice("C:/tools/stockfish.exe"), None);
+        assert_eq!(engine_notice("/usr/bin/stockfish"), None);
+    }
+
+    #[test]
+    fn analysis_complete_text_appends_engine_notice() {
+        assert_eq!(
+            analysis_complete_text(42, None),
+            "Analysis complete: 42 moves classified."
+        );
+        assert_eq!(
+            analysis_complete_text(3, Some("mock warning")),
+            "Analysis complete: 3 moves classified. mock warning"
         );
     }
 
