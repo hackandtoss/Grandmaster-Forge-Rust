@@ -929,6 +929,155 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// One-time backfill for databases whose repertoire graph predates course
+    /// metadata: every root-to-leaf path containing at least one user move
+    /// becomes a named line in the side's Uncategorized course. Gated per side
+    /// on "no course lines exist yet", so organically created courses are never
+    /// touched and re-runs are no-ops. Transposition cycles are cut with a
+    /// per-path visited set; depth and path-count caps bound pathological graphs.
+    fn backfill_uncategorized_course_lines(&mut self) -> Result<u32, String> {
+        const MAX_LINES_PER_SIDE: usize = 500;
+        const MAX_PLIES: usize = 40;
+        let mut created = 0u32;
+        for side in ["White", "Black"] {
+            let side_has_lines: i64 = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM course_lines cl
+                        JOIN course_chapters cc ON cc.id = cl.chapter_id
+                        JOIN courses c ON c.id = cc.course_id
+                        WHERE c.side = ?1)",
+                    [side],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if side_has_lines != 0 {
+                continue;
+            }
+
+            // (edge id, parent node, child node, san, is_my_move), side-scoped.
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT m.id, m.parent_id, m.child_id, m.san, m.is_my_move
+                     FROM repertoire_moves m
+                     JOIN repertoire_nodes p ON p.id = m.parent_id
+                     WHERE p.side = ?1
+                     ORDER BY m.id",
+                )
+                .map_err(|e| e.to_string())?;
+            let edges: Vec<(i64, i64, i64, String, bool)> = stmt
+                .query_map([side], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get::<_, i64>(4)? != 0,
+                    ))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?;
+            drop(stmt);
+            if !edges.iter().any(|(_, _, _, _, my)| *my) {
+                continue;
+            }
+
+            use std::collections::{HashMap, HashSet};
+            let mut children: HashMap<i64, Vec<usize>> = HashMap::new();
+            let mut child_nodes: HashSet<i64> = HashSet::new();
+            for (idx, edge) in edges.iter().enumerate() {
+                children.entry(edge.1).or_default().push(idx);
+                child_nodes.insert(edge.2);
+            }
+            let mut roots: Vec<i64> = edges
+                .iter()
+                .map(|edge| edge.1)
+                .filter(|parent| !child_nodes.contains(parent))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            roots.sort_unstable();
+            if roots.is_empty() {
+                // Fully cyclic graph: nothing safe to walk.
+                continue;
+            }
+
+            // DFS collecting root-to-leaf edge-index paths, smallest edge first.
+            let mut paths: Vec<Vec<usize>> = Vec::new();
+            'roots: for root in roots {
+                let mut stack = vec![(root, Vec::<usize>::new(), HashSet::from([root]))];
+                while let Some((node, path, visited)) = stack.pop() {
+                    if paths.len() >= MAX_LINES_PER_SIDE {
+                        break 'roots;
+                    }
+                    let extendable: Vec<usize> = children
+                        .get(&node)
+                        .map(|kids| {
+                            kids.iter()
+                                .copied()
+                                .filter(|&idx| !visited.contains(&edges[idx].2))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if extendable.is_empty() || path.len() >= MAX_PLIES {
+                        if !path.is_empty() && path.iter().any(|&idx| edges[idx].4) {
+                            paths.push(path);
+                        }
+                        continue;
+                    }
+                    for &idx in extendable.iter().rev() {
+                        let mut next_path = path.clone();
+                        next_path.push(idx);
+                        let mut next_visited = visited.clone();
+                        next_visited.insert(edges[idx].2);
+                        stack.push((edges[idx].2, next_path, next_visited));
+                    }
+                }
+            }
+            if paths.is_empty() {
+                continue;
+            }
+
+            let chapter_id = self.ensure_uncategorized_chapter(side)?;
+            for (order, path) in paths.iter().enumerate() {
+                let sans: Vec<&str> = path.iter().map(|&idx| edges[idx].3.as_str()).collect();
+                let title = if sans.len() <= 4 {
+                    sans.join(" ")
+                } else {
+                    format!("{} ... {}", sans[..3].join(" "), sans[sans.len() - 1])
+                };
+                // Path-keyed id: transpositions can reach one leaf two ways,
+                // so the leaf alone would collide.
+                let key = path
+                    .iter()
+                    .map(|&idx| edges[idx].0.to_string())
+                    .collect::<Vec<_>>()
+                    .join("-");
+                let line_id = format!("{chapter_id}:backfill:{key}");
+                self.insert_course_line(&CourseLineRecord {
+                    id: line_id.clone(),
+                    chapter_id: chapter_id.clone(),
+                    title,
+                    description: String::new(),
+                    root_node_id: edges[path[0]].1,
+                    sort_order: order as i32,
+                    pgn: None,
+                })?;
+                let line_moves: Vec<(i64, i32, bool)> = path
+                    .iter()
+                    .enumerate()
+                    .map(|(ply, &idx)| (edges[idx].0, ply as i32, edges[idx].4))
+                    .collect();
+                self.set_course_line_moves(&line_id, &line_moves)?;
+                created += 1;
+            }
+        }
+        Ok(created)
+    }
+
     pub fn update_repertoire_move_fsrs(
         &mut self,
         move_id: i64,
@@ -1578,6 +1727,7 @@ impl TrainingStore for SqliteStore {
             }
         }
         self.migrate_sm2_to_fsrs()?;
+        self.backfill_uncategorized_course_lines()?;
         Ok(())
     }
 
@@ -2464,6 +2614,100 @@ mod tests {
         assert_eq!(puzzle_events.len(), 1);
         assert_eq!(puzzle_events[0].course_id, None);
         assert_eq!(puzzle_events[0].move_id, None);
+    }
+
+    #[test]
+    fn backfill_creates_uncategorized_lines_for_pre_course_graphs() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+        // Pre-course graph: root -> e4(my) -> {e5(opp) -> Nf3(my) [leaf],
+        //                                     c5(opp) -> Nc3(my) [leaf]}
+        let root = store
+            .ensure_repertoire_node("start w - - 0 1", "White")
+            .unwrap();
+        let after_e4 = store
+            .ensure_repertoire_node("e4pos b - - 0 1", "White")
+            .unwrap();
+        let after_e5 = store
+            .ensure_repertoire_node("e5pos w - - 0 1", "White")
+            .unwrap();
+        let after_nf3 = store
+            .ensure_repertoire_node("nf3pos b - - 0 1", "White")
+            .unwrap();
+        let after_c5 = store
+            .ensure_repertoire_node("c5pos w - - 0 1", "White")
+            .unwrap();
+        let after_nc3 = store
+            .ensure_repertoire_node("nc3pos b - - 0 1", "White")
+            .unwrap();
+        let (e4, _) = store
+            .insert_repertoire_move(root, after_e4, "e2e4", "e4", true, "study")
+            .unwrap();
+        let (e5, _) = store
+            .insert_repertoire_move(after_e4, after_e5, "e7e5", "e5", false, "study")
+            .unwrap();
+        let (nf3, _) = store
+            .insert_repertoire_move(after_e5, after_nf3, "g1f3", "Nf3", true, "study")
+            .unwrap();
+        let (_c5, _) = store
+            .insert_repertoire_move(after_e4, after_c5, "c7c5", "c5", false, "explorer")
+            .unwrap();
+        let (_nc3, _) = store
+            .insert_repertoire_move(after_c5, after_nc3, "b1c3", "Nc3", true, "explorer")
+            .unwrap();
+
+        // Re-running bootstrap (as the app does at startup) backfills once.
+        store.bootstrap().unwrap();
+        let chapters = store.get_course_chapters("uncategorized-white").unwrap();
+        assert_eq!(chapters.len(), 1);
+        let lines = store.get_course_lines(&chapters[0].id).unwrap();
+        assert_eq!(lines.len(), 2, "one line per leaf path");
+        assert!(lines.iter().any(|l| l.title.contains("Nf3")));
+        assert!(lines.iter().any(|l| l.title.contains("Nc3")));
+
+        // Full path stored in order, with per-edge my-move flags preserved.
+        let nf3_line = lines.iter().find(|l| l.title.contains("Nf3")).unwrap();
+        let moves = store.get_course_line_moves(&nf3_line.id).unwrap();
+        assert_eq!(moves, vec![(e4, 0, true), (e5, 1, false), (nf3, 2, true)]);
+        // Lines are live: status derivation works on backfilled lines.
+        assert_eq!(
+            store
+                .course_line_status(&nf3_line.id, "2026-07-11")
+                .unwrap(),
+            "Undiscovered"
+        );
+
+        // Idempotent: a third bootstrap adds nothing.
+        store.bootstrap().unwrap();
+        assert_eq!(store.get_course_lines(&chapters[0].id).unwrap().len(), 2);
+
+        // No Black data: no Black uncategorized course was created.
+        assert!(store.get_course("uncategorized-black").unwrap().is_none());
+    }
+
+    #[test]
+    fn backfill_skips_sides_that_already_have_course_lines() {
+        let mut store = SqliteStore::new_in_memory().unwrap();
+        store.bootstrap().unwrap();
+        let root = store
+            .ensure_repertoire_node("a w - - 0 1", "White")
+            .unwrap();
+        let child = store
+            .ensure_repertoire_node("b b - - 0 1", "White")
+            .unwrap();
+        let (move_id, _) = store
+            .insert_repertoire_move(root, child, "e2e4", "e4", true, "manual")
+            .unwrap();
+        add_test_course(&mut store, root);
+        store
+            .set_course_line_moves("line", &[(move_id, 0, true)])
+            .unwrap();
+
+        store.bootstrap().unwrap();
+        // The organic course still has its one line and no uncategorized
+        // course appeared: this side already has course lines.
+        assert_eq!(store.get_course_lines("chapter").unwrap().len(), 1);
+        assert!(store.get_course("uncategorized-white").unwrap().is_none());
     }
 
     #[test]
